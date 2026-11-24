@@ -29,6 +29,39 @@ const Apps = z.object({
   }).passthrough()).default([]),
 });
 const Deployments = z.object({ deployments: z.array(Deployment).default([]) });
+// GET /v2/apps/{id}/health (app:read): per-component state as App Platform "Insights" shows it.
+const HealthComponent = z.object({
+  name: z.string(), state: z.string().optional(),
+  cpu_usage_percent: z.number().optional(), memory_usage_percent: z.number().optional(),
+  replicas_desired: z.number().optional(), replicas_ready: z.number().optional(),
+}).passthrough();
+const AppHealth = z.object({ app_health: z.object({ components: z.array(HealthComponent).default([]) }).passthrough().optional() });
+export type AppHealthComponent = z.infer<typeof HealthComponent>;
+
+/** CPU or memory at or above this (%) means the app is saturated, even if DigitalOcean still calls it healthy. */
+export const SATURATED_PCT = 95;
+
+/**
+ * App status from the component health (and CPU/memory saturation), on top of the deploy status.
+ * No ready replica in any component → down; an unhealthy component, missing replicas or saturation → warn.
+ */
+export function appHealthStatus(base: { status: ResourceStatus; text: string }, comps: AppHealthComponent[], metrics: InfraResource['metrics']): { status: ResourceStatus; text: string } {
+  const problems: string[] = [];
+  let anyUp = false; let anyDesired = false;
+  for (const c of comps) {
+    const desired = c.replicas_desired; const ready = c.replicas_ready;
+    if (desired !== undefined && desired > 0) anyDesired = true;
+    if (ready !== undefined && ready > 0) anyUp = true;
+    const short = desired !== undefined && ready !== undefined && ready < desired;
+    const unhealthy = c.state !== undefined && c.state !== 'HEALTHY' && c.state !== 'UNKNOWN';
+    if (unhealthy || short) problems.push(`${c.name}${short ? ` ${ready}/${desired}` : ''}${unhealthy ? ` ${c.state!.toLowerCase()}` : ''}`);
+  }
+  if (base.status === 'down' || base.status === 'unknown') return base;
+  if (anyDesired && !anyUp) return { status: 'down', text: `no ready instance${problems.length ? ` (${problems.join(', ')})` : ''}` };
+  const hot = [['CPU', metrics?.cpu], ['memory', metrics?.memory]].filter(([, v]) => typeof v === 'number' && v >= SATURATED_PCT).map(([k, v]) => `${k} ${Math.round(v as number)}%`);
+  if (problems.length || hot.length) return { status: 'warn', text: ['degraded', ...problems, ...hot].join(' · ') };
+  return base;
+}
 
 /** CPU usage (%) from the per-mode counters of the last interval. */
 export function cpuUsage(s: SeriesT): number | undefined {
@@ -96,6 +129,8 @@ export function peakPercent(s: SeriesT): number | undefined {
 /** App CPU/memory are read at most every 5 min (rate limit: 5,000 requests/hour); without monitoring:read, re-checked every 30 min. */
 const APP_METRICS_EVERY_MS = 5 * 60_000;
 const APP_METRICS_RECHECK_MS = 30 * 60_000;
+/** App health is the main status signal: read on every poll, but not more than once a minute. */
+const APP_HEALTH_EVERY_MS = 60_000;
 
 async function inBatches<T>(items: T[], size: number, fn: (x: T) => Promise<void>): Promise<void> {
   for (let i = 0; i < items.length; i += size) await Promise.all(items.slice(i, i + size).map(fn));
@@ -115,6 +150,7 @@ export function digitalOceanProvider(opts: { token: string; tag?: string | undef
   let appMetricsAt = Number.NEGATIVE_INFINITY;
   let appMetricsScope: boolean | null = null;
   const deploysCache = new Map<string, { sig: string; list: z.infer<typeof Deployments>['deployments'] }>();
+  const healthCache = new Map<string, { at: number; comps: AppHealthComponent[] }>();
 
   return {
     id: 'digitalocean', label: 'DigitalOcean',
@@ -173,13 +209,37 @@ export function digitalOceanProvider(opts: { token: string; tag?: string | undef
       await inBatches(apps.apps, 10, async app => {
         const active = app.active_deployment;
         const inProgress = app.in_progress_deployment;
-        const status: ResourceStatus = active ? (deployPhase(inProgress?.phase) === 'failed' ? 'warn' : 'ok') : inProgress ? 'warn' : 'unknown';
+        const deployStatus: ResourceStatus = active ? (deployPhase(inProgress?.phase) === 'failed' ? 'warn' : 'ok') : inProgress ? 'warn' : 'unknown';
         const id = `digitalocean:app:${app.id}`;
         const components = appComponents(app.spec);
+        // Component health (Insights): a deploy can be ACTIVE while the instances are degraded or pegged at 100% CPU.
+        let comps: AppHealthComponent[] = [];
+        if (active) {
+          const hc = healthCache.get(app.id);
+          if (hc && now - hc.at < APP_HEALTH_EVERY_MS) comps = hc.comps;
+          else {
+            const read = await getJson(fetcher, `${API}/v2/apps/${app.id}/health`, h, AppHealth).then(r => r.app_health?.components ?? []).catch(() => null);
+            if (read) { comps = read; healthCache.set(app.id, { at: now, comps }); } else comps = hc?.comps ?? [];
+          }
+        }
+        // Health carries fresh CPU/memory per component; the busiest one wins over the throttled monitoring values.
+        const peak = (k: 'cpu_usage_percent' | 'memory_usage_percent') => {
+          const v = comps.map(c => c[k]).filter((x): x is number => typeof x === 'number' && Number.isFinite(x));
+          return v.length ? pct(Math.max(...v)) : undefined;
+        };
+        const monitored = active ? appMetrics.get(app.id) : undefined;
+        const hCpu = peak('cpu_usage_percent'); const hMem = peak('memory_usage_percent');
+        const metrics = active && (monitored || hCpu !== undefined || hMem !== undefined)
+          ? { cpu: hCpu ?? monitored?.cpu, memory: hMem ?? monitored?.memory } : undefined;
+        for (const comp of components) {
+          const hit = comps.find(c => comp.type.endsWith(` ${c.name}`));
+          if (hit?.replicas_ready !== undefined) comp.up = hit.replicas_ready;
+        }
+        const base = { status: deployStatus, text: inProgress ? `deploy ${inProgress.phase?.toLowerCase() ?? ''}`.trim() : active ? 'active' : 'no active deploy' };
+        const st = appHealthStatus(base, comps, metrics);
         resources.push({
-          id, provider: 'digitalocean', kind: 'app', name: app.spec.name, status,
-          statusText: inProgress ? `deploy ${inProgress.phase?.toLowerCase() ?? ''}`.trim() : active ? 'active' : 'no active deploy',
-          region: app.region?.slug, url: app.live_url, metrics: active ? appMetrics.get(app.id) : undefined,
+          id, provider: 'digitalocean', kind: 'app', name: app.spec.name, status: st.status, statusText: st.text,
+          region: app.region?.slug, url: app.live_url, metrics,
           ...(components.length ? { components } : {}),
         });
         // Deployments only change with a new deploy: refetch when the active/in-progress deploy changes.

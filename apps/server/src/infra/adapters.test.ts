@@ -1,7 +1,7 @@
 // Adapters with simulated API responses (no real calls).
 import { describe, expect, it } from 'vitest';
 import { azureProvider, azureSeverity, healthStatus, resourceFromHealthId } from './azure.js';
-import { appComponents, cpuUsage, deployPhase, digitalOceanProvider, memoryUsage, peakPercent } from './digitalocean.js';
+import { appComponents, appHealthStatus, cpuUsage, deployPhase, digitalOceanProvider, memoryUsage, peakPercent } from './digitalocean.js';
 import { grafanaProvider, grafanaSeverity } from './grafana.js';
 import { appStatus, dynoComponents, herokuProvider } from './heroku.js';
 import type { Fetcher } from './http.js';
@@ -103,6 +103,26 @@ describe('DigitalOcean', () => {
     expect([metricCalls(), deployCalls()]).toEqual([2, 1]);
     await p.poll(5 * 60_000);
     expect(metricCalls()).toBe(4);
+  });
+
+  it('app status from component health and saturation, not only the deploy', () => {
+    const ok = { status: 'ok' as const, text: 'active' };
+    expect(appHealthStatus(ok, [{ name: 'web', state: 'HEALTHY', replicas_desired: 2, replicas_ready: 2 }], { cpu: 40 })).toEqual(ok);
+    expect(appHealthStatus(ok, [{ name: 'web', state: 'UNHEALTHY', replicas_desired: 2, replicas_ready: 1 }], undefined))
+      .toEqual({ status: 'warn', text: 'degraded · web 1/2 unhealthy' });
+    expect(appHealthStatus(ok, [{ name: 'web', state: 'HEALTHY' }], { cpu: 100, memory: 50 })).toEqual({ status: 'warn', text: 'degraded · CPU 100%' });
+    expect(appHealthStatus(ok, [{ name: 'web', state: 'UNHEALTHY', replicas_desired: 1, replicas_ready: 0 }], undefined).status).toBe('down');
+  });
+
+  it('degraded app at max CPU shows as warn even with an ACTIVE deploy', async () => {
+    const { f, calls } = oneApp(() => json({ id: 'forbidden' }, 403));
+    const withHealth: Fetcher = async (url, init) => /\/v2\/apps\/a1\/health/.test(url)
+      ? json({ app_health: { components: [{ name: 'web', state: 'UNHEALTHY', cpu_usage_percent: 100, memory_usage_percent: 70, replicas_desired: 1, replicas_ready: 1 }] } })
+      : f(url, init);
+    const p = digitalOceanProvider({ token: 't', fetcher: withHealth });
+    const r = (await p.poll(0)).resources[0]!;
+    expect(r).toMatchObject({ status: 'warn', statusText: 'degraded · web unhealthy · CPU 100%', metrics: { cpu: 100, memory: 70 }, components: [{ type: 'service web', up: 1 }] });
+    expect(calls.length).toBeGreaterThan(0);
   });
 
   it('without monitoring:read: one probe, a warning, and no per-app metric calls until the re-check', async () => {
