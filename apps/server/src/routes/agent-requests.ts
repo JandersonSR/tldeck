@@ -95,6 +95,20 @@ export async function agentRequestsRoutes(app: FastifyInstance, opts: {
     return { ok: true };
   });
 
+  // Failed or cancelled request: back to triage (the same item may not already be with the agents).
+  app.post('/api/agent-requests/:id/retry', async (req, reply) => {
+    const { id } = Id.parse(req.params);
+    if (!(await ready())) return reply.code(503).send({ error: 'storage not configured' });
+    const cur = await requests.get(id);
+    if (!cur) return reply.code(404).send({ error: 'not found' });
+    if (cur.status !== 'failed' && cur.status !== 'cancelled') throw conflict(`the request is "${cur.status}"`);
+    if (await requests.openFor(cur.sourceKey) || await runs.activeTaskFor(cur.sourceKey)) throw conflict('already with the agents');
+    // '' / null instead of undefined: $set ignores undefined in the local store and would keep the old value
+    await requests.update(id, { status: 'triaging', error: '', runId: '', triage: null as never, question: '' });
+    dispatcher.kick();
+    return { ok: true };
+  });
+
   app.post('/api/agent-requests/:id/cancel', async (req, reply) => {
     const { id } = Id.parse(req.params);
     if (!(await ready())) return reply.code(503).send({ error: 'storage not configured' });

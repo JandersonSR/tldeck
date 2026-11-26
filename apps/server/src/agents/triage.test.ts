@@ -51,14 +51,28 @@ describe('triage contract', () => {
 
 describe('decideTriage', () => {
   it('queues an executable request with a resolvable repo', () => {
-    expect(decideTriage(ok, true)).toEqual({ status: 'queued' });
+    expect(decideTriage(ok, 'resolved')).toEqual({ status: 'queued' });
   });
 
   it('needs input on a question, on not executable, on an unknown repo and on triage failure', () => {
-    expect(decideTriage({ ...ok, question: 'Qual API?' }, true)).toEqual({ status: 'needs_input', question: 'Qual API?' });
-    expect(decideTriage({ ...ok, executable: false }, true).status).toBe('needs_input');
-    expect(decideTriage(ok, false).status).toBe('needs_input');
-    expect(decideTriage(undefined, true)).toEqual({ status: 'needs_input', question: TRIAGE_FAILED_QUESTION });
+    expect(decideTriage({ ...ok, question: 'Qual API?' }, 'resolved')).toEqual({ status: 'needs_input', question: 'Qual API?' });
+    expect(decideTriage({ ...ok, executable: false }, 'resolved').status).toBe('needs_input');
+    expect(decideTriage(ok, 'missing').status).toBe('needs_input');
+    expect(decideTriage(undefined, 'resolved')).toEqual({ status: 'needs_input', question: TRIAGE_FAILED_QUESTION });
+  });
+});
+
+describe('decideTriage without a repository', () => {
+  const none = { ...ok, repo: null };
+  it('queues docs, investigation and other; asks for the repo on code flows', () => {
+    for (const flow of ['docs', 'investigation', 'other'] as const) expect(decideTriage({ ...none, flow }, 'none')).toEqual({ status: 'queued' });
+    for (const flow of ['bug', 'feature', 'review', 'cherry-pick'] as const) {
+      expect(decideTriage({ ...none, flow }, 'none')).toEqual({ status: 'needs_input', question: 'Which repository?' });
+    }
+  });
+
+  it('a named repo with no clone still needs input, whatever the flow', () => {
+    expect(decideTriage({ ...ok, flow: 'docs' }, 'missing').status).toBe('needs_input');
   });
 });
 

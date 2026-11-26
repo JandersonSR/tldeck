@@ -26,7 +26,7 @@ export interface Run {
 
 export type FindingDecision = 'accepted' | 'rejected' | null;
 
-export type TaskPhase = 'planning' | 'awaiting_approval' | 'implementing' | 'verifying' | 'ready' | 'pr_opened' | 'discarded' | 'failed';
+export type TaskPhase = 'planning' | 'awaiting_approval' | 'implementing' | 'verifying' | 'ready' | 'pr_opened' | 'applied' | 'discarded' | 'failed';
 export interface TaskState {
   phase: TaskPhase; issueUrl?: string; issueTitle: string; repo: string; repoPath: string; worktree: string; branch: string; base: string;
   plan?: { summary: string; steps: string[]; files: string[]; tests: string[]; risks: string[]; questions: string[] };
@@ -34,6 +34,7 @@ export interface TaskState {
   implementation?: { summary: string; changes: string[]; testsRun: string[]; testsPassed: boolean | null; followUps: string[] };
   verify?: { command: string; ok: boolean; code: number | null; output: string; durationMs: number };
   prUrl?: string; error?: string;
+  workspace?: 'git' | 'local' | 'scratch'; targetPath?: string; appliedCount?: number;
 }
 
 export interface QualityBucket {
@@ -154,6 +155,23 @@ function useTaskAction<B>(path: string, ok: string, fail: string) {
 
 export const useApproveTask = () => useTaskAction<{ notes?: string }>('approve', k('Plan approved: the agent is implementing'), k('Could not approve'));
 export const useDiscardTask = () => useTaskAction<never>('discard', k('Task discarded'), k('Could not discard'));
+export interface ApplyResult { applied: string[]; skippedDeletes: string[] }
+
+export function useApplyToFolder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post<ApplyResult>(`/api/runs/${id}/apply`),
+    onSuccess: (r, id) => {
+      void qc.invalidateQueries({ queryKey: ['run', id] }); void qc.invalidateQueries({ queryKey: ['runs'] });
+      toast.success(t('{n} file(s) applied to the folder', { n: r.applied.length }), {
+        ...(r.skippedDeletes.length ? { description: t('{n} deletion(s) ignored: {files}', { n: r.skippedDeletes.length, files: r.skippedDeletes.join(', ') }) } : {}),
+        duration: 8000,
+      });
+    },
+    onError: (e: Error) => toast.error(t('Could not apply'), { description: e.message }),
+  });
+}
+
 export const useTaskPr = () => useTaskAction<never>('task-pr', k('Draft PR created'), k('Could not create the PR'));
 
 export const useTaskDiff = (id: string, enabled: boolean) => useQuery({

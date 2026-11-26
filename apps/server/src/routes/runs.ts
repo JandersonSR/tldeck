@@ -91,5 +91,6 @@ export async function runsRoutes(app: FastifyInstance, opts: { agents: AgentServ
 
   // Actions that leave the machine: only on click, with on-screen confirmation.
   app.post('/api/runs/:id/task-pr', async (req) => agents.openTaskPr(Id.parse(req.params).id));
+  app.post('/api/runs/:id/apply', async (req) => agents.applyToFolder(Id.parse(req.params).id));
   app.post('/api/runs/:id/pending-review', async (req) => agents.postPendingReview(Id.parse(req.params).id));
 }

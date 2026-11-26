@@ -7,14 +7,14 @@ export interface ExecResult { ok: boolean; stdout: string; stderr: string; code:
  * On Windows, CLIs installed through npm are .cmd files and need a shell; that is why the args are always
  * constants or validated by the caller.
  */
-export function execCmd(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ExecResult> {
+export function execCmd(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; shell?: boolean } = {}): Promise<ExecResult> {
   return new Promise(resolve => {
     execFile(cmd, args, {
       cwd: opts.cwd,
       timeout: opts.timeoutMs ?? 8000,
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
-      shell: process.platform === 'win32',
+      shell: opts.shell ?? process.platform === 'win32',
       env: opts.env ?? process.env,
     }, (err, stdout, stderr) => {
       const code = err && typeof (err as NodeJS.ErrnoException & { code?: unknown }).code === 'number'

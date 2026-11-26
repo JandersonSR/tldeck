@@ -64,6 +64,7 @@ export class AgentService {
   startTask(...a: Parameters<TaskService['startTask']>) { return this.tasks.startTask(...a); }
   approveTask(id: string, notes?: string) { return this.tasks.approveTask(id, notes); }
   openTaskPr(id: string) { return this.tasks.openTaskPr(id); }
+  applyToFolder(id: string) { return this.tasks.applyToFolder(id); }
   discardTask(id: string) { return this.tasks.discardTask(id); }
   taskDiff(id: string) { return this.tasks.taskDiff(id); }
   taskPatch(id: string, file?: string) { return this.tasks.taskPatch(id, file); }

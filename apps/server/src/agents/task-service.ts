@@ -12,9 +12,12 @@ import type { AgentRequest, RequestSource } from './requests-repo.js';
 import type { RunDoc, TaskPhase, TaskState } from './runs-repo.js';
 import {
   buildImplementPrompt, buildPlanPrompt, buildPrBody, composeInstruction, implementationTools, parseImplementation, parseIssueUrl, parsePlan,
-  PLAN_TOOLS, requestBranch, resolveOwnerRepo, splitCommand, TASK_PROMPT_VERSION, taskBranch, type IssueInput,
+  PLAN_TOOLS, requestBranch, resolveOwnerRepo, splitCommand, TASK_PROMPT_VERSION, taskBranch, workspaceNote, type IssueInput,
 } from './task.js';
-import { commitLeftovers, commitsAhead, createWorktree, pushBranch, removeWorktree, repoInstructions } from './worktree.js';
+import {
+  commitLeftovers, commitsAhead, createScratch, createWorktree, detectWorkspace, diffNameStatus, planApply, pushBranch, removeWorktree, repoInstructions,
+  type Workspace,
+} from './worktree.js';
 
 /** What the planning step needs to know about the thing to do (an issue or an activity). */
 interface PlanInput {
@@ -47,22 +50,27 @@ export class TaskService {
   }
 
   private async taskPreviewFor(issue: Awaited<ReturnType<TaskService['fetchIssue']>>) {
-    return this.planPreview(issue, this.repoPathOf(issue.repo));
+    const repoPath = this.repoPathOf(issue.repo);
+    return this.planPreview(issue, repoPath, await detectWorkspace(repoPath));
   }
 
-  private async planPreview(i: PlanInput, repoPath: string) {
-    const { hits } = await this.ctx.featMaps.search(`${i.title} ${i.repo}`, { repo: i.repo, limit: 3 });
-    const ctx = await this.ctx.featContext(`${i.title} ${i.repo}`, i.repo);
+  /** repoPath is absent for requests with no repository (research, drafts): the featContext is then searched without a repo. */
+  private async planPreview(i: PlanInput, repoPath: string | undefined, ws: Workspace) {
+    const scope = repoPath ? i.repo : '';
+    const { hits } = await this.ctx.featMaps.search(`${i.title} ${scope}`.trim(), { repo: scope, limit: 3 });
+    const ctx = await this.ctx.featContext(`${i.title} ${scope}`.trim(), scope);
     const raw = buildPlanPrompt({
       issue: { url: i.url, title: i.title, body: i.body }, userPrompt: i.userPrompt, featContext: ctx,
-      repoInstructions: repoInstructions(repoPath), lang: this.ctx.cfg.contentLang,
+      repoInstructions: (ws.workspace === 'scratch' ? ws.targetPath : repoPath) ? repoInstructions((ws.workspace === 'scratch' ? ws.targetPath : repoPath)!) : undefined,
+      workspaceNote: workspaceNote(ws.workspace, ws.targetPath), lang: this.ctx.cfg.contentLang,
     });
     const m = this.ctx.mask(raw);
     return {
       prompt: m.text, masked: m.total, features: hits.map(h => `${h.pack.map}:${h.pack.id}`),
-      repo: `${i.owner}/${i.repo}`, repoPath,
+      repo: `${i.owner}/${i.repo}`, repoPath: repoPath ?? '', workspace: ws.workspace, ...(ws.base ? { base: ws.base } : {}),
+      ...(ws.targetPath ? { targetPath: ws.targetPath } : {}),
       branch: i.number !== undefined ? taskBranch(i.number, i.title) : requestBranch(i.requestId ?? 'task', i.title),
-      verify: this.verifyCommand(i.repo) ?? null, title: i.title,
+      verify: (ws.workspace === 'scratch' ? undefined : this.verifyCommand(i.repo)) ?? null, title: i.title,
     };
   }
 
@@ -114,11 +122,17 @@ export class TaskService {
     const requestId = String(req._id);
     const issueRef = req.source.kind === 'issue' ? parseIssueUrl(req.source.url) : undefined;
     const repoName = req.triage?.repo ?? req.repoHint ?? issueRef?.repo;
-    if (!repoName) throw Object.assign(new Error('no repository for this request'), { statusCode: 409 });
-    const repoPath = this.repoPathOf(repoName);
-    const origin = await execCmd('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
-    const target = resolveOwnerRepo(repoName, origin.ok ? origin.stdout : undefined, this.ctx.cfg.github.org);
-    if (!target) throw Object.assign(new Error(`could not tell the GitHub owner of ${repoName} (no origin remote, no GITHUB_ORG)`), { statusCode: 409 });
+    const repoPath = repoName ? this.repoPathOf(repoName) : undefined; // no name = a task with no repository (scratch)
+    const ws = await detectWorkspace(repoPath);
+    let target: { owner: string; repo: string };
+    if (ws.workspace === 'git') {
+      const origin = await execCmd('git', ['remote', 'get-url', 'origin'], { cwd: repoPath! });
+      const resolved = resolveOwnerRepo(repoName!, origin.ok ? origin.stdout : undefined, this.ctx.cfg.github.org);
+      if (!resolved) throw Object.assign(new Error(`could not tell the GitHub owner of ${repoName} (no origin remote, no GITHUB_ORG)`), { statusCode: 409 });
+      target = resolved;
+    } else {
+      target = { owner: 'local', repo: path.basename(ws.targetPath ?? repoPath ?? '') || 'scratch' };
+    }
     const sameRepo = !!issueRef && `${issueRef.owner}/${issueRef.repo}`.toLowerCase() === `${target.owner}/${target.repo}`.toLowerCase();
     const base: PlanInput = {
       title: req.title, body: req.body, url: req.source.kind === 'issue' ? req.source.url : undefined,
@@ -126,7 +140,7 @@ export class TaskService {
       userPrompt: composeInstruction({ userPrompt: req.userPrompt, answers: req.answers, acceptance: req.triage?.acceptance }),
       requestId, source: req.source,
     };
-    const preview = await this.planPreview(base, repoPath);
+    const preview = await this.planPreview(base, repoPath, ws);
     return this.beginPlanning({ ...base, itemKey: req.sourceKey, model: opts.model, preview });
   }
 
@@ -138,13 +152,16 @@ export class TaskService {
     const masked = this.ctx.mask(input.promptOverride ?? preview.prompt);
     const label = input.number ?? (input.requestId ?? 'task').slice(-6);
     const worktree = path.join(this.ctx.cfg.paths.worktrees, `${input.repo}-${label}-${Date.now().toString(36)}`);
-    const { base } = await createWorktree(preview.repoPath, worktree, preview.branch);
+    const { workspace, targetPath } = preview;
+    const { base } = workspace === 'scratch' ? await createScratch(worktree, targetPath)
+      : await createWorktree(preview.repoPath, worktree, preview.branch, workspace === 'local' ? { base: preview.base! } : {});
     const task: TaskState = {
       phase: 'planning', issueTitle: input.title, issueBody: input.body,
       ...(input.url ? { issueUrl: input.url } : {}),
       ...(input.source ? { source: input.source } : {}), ...(input.requestId ? { requestId: input.requestId } : {}),
       ...(input.userPrompt ? { userPrompt: input.userPrompt } : {}),
-      repo: preview.repo, repoPath: preview.repoPath, worktree, branch: preview.branch, base,
+      repo: preview.repo, repoPath: preview.repoPath, worktree, branch: preview.branch, base, workspace,
+      ...(targetPath ? { targetPath } : {}),
     };
     const id = await this.ctx.runs.create({
       kind: 'task', engine: 'claude', itemKey: input.itemKey,
@@ -187,7 +204,7 @@ export class TaskService {
     const t = run.task;
     const cleanNotes = notes?.trim() ? this.ctx.mask(notes.trim().slice(0, 4000)).text : undefined;
     const prompt = this.ctx.mask(buildImplementPrompt({
-      issue: { url: t.issueUrl, title: t.issueTitle, body: t.issueBody ?? '' }, userPrompt: t.userPrompt, plan: t.plan!, notes: cleanNotes, testCommands: this.ctx.cfg.tasks.testCommands, lang: this.ctx.cfg.contentLang,
+      issue: { url: t.issueUrl, title: t.issueTitle, body: t.issueBody ?? '' }, userPrompt: t.userPrompt, plan: t.plan!, notes: cleanNotes, testCommands: this.ctx.cfg.tasks.testCommands, workspaceNote: workspaceNote(t.workspace, t.targetPath), lang: this.ctx.cfg.contentLang,
     })).text;
     let cur = await this.setPhase(id, t, { phase: 'implementing', approvedAt: new Date(), ...(cleanNotes ? { notes: cleanNotes } : {}) }, { status: 'running' });
     await this.ctx.runs.appendLog(id, [{ at: new Date(), type: 'start', text: 'plan approved — implementation' }]);
@@ -201,7 +218,7 @@ export class TaskService {
     }, async (r) => {
       const impl = r.ok ? parseImplementation(r.resultText) : undefined;
       const number = this.issueNumberFor(t);
-      await commitLeftovers(t.worktree, `${t.issueTitle} (${number !== undefined ? `#${number}` : (t.requestId ?? 'task').slice(-6)})`);
+      await commitLeftovers(t.worktree, `${t.issueTitle} (${number !== undefined ? `#${number}` : (t.requestId ?? 'task').slice(-6)})`, t.workspace === 'scratch');
       const ahead = await commitsAhead(t.worktree, t.base);
       const usage = r.usage ? { usage: this.sumUsage(run.usage, r.usage) } : {};
       if (!impl?.ok || ahead === 0) {
@@ -209,7 +226,7 @@ export class TaskService {
         await this.setPhase(id, cur, { phase: 'failed', error }, { status: r.timedOut ? 'timeout' : r.cancelled ? 'cancelled' : 'failed', endedAt: new Date(), ...usage });
         return;
       }
-      const verify = this.verifyCommand(t.repo);
+      const verify = t.workspace === 'scratch' ? undefined : this.verifyCommand(t.repo);
       cur = await this.setPhase(id, cur, { implementation: impl.value, phase: verify ? 'verifying' : 'ready' }, usage);
       if (verify) {
         const started = Date.now();
@@ -239,6 +256,9 @@ ${v.stderr}`.trim().slice(-6000)).text;
   async openTaskPr(id: string): Promise<{ url: string }> {
     const run = await this.getTask(id, ['ready']);
     const t = run.task;
+    if (t.workspace && t.workspace !== 'git') {
+      throw Object.assign(new Error(`this task has no remote: the changes are in ${t.workspace === 'local' ? `local branch ${t.branch}` : `the folder ${t.worktree}`}`), { statusCode: 409 });
+    }
     const gh = this.ctx.requireGh();
     await pushBranch(t.worktree, t.branch);
     const pr = await gh.rest('POST', `/repos/${t.repo}/pulls`, z.object({ html_url: z.string() }), {
@@ -252,21 +272,38 @@ ${v.stderr}`.trim().slice(-6000)).text;
 
   /** Descarta a tarefa: para o agente, remove a worktree e a branch local. */
   async discardTask(id: string): Promise<void> {
-    const run = await this.getTask(id, ['planning', 'awaiting_approval', 'implementing', 'verifying', 'ready', 'failed']);
+    const run = await this.getTask(id, ['planning', 'awaiting_approval', 'implementing', 'verifying', 'ready', 'applied', 'failed']);
     this.ctx.cancel(id);
-    await removeWorktree(run.task.repoPath, run.task.worktree, run.task.branch);
+    if (run.task.workspace === 'scratch') fs.rmSync(run.task.worktree, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+    else await removeWorktree(run.task.repoPath, run.task.worktree, run.task.branch);
     await this.setPhase(id, run.task, { phase: 'discarded' }, run.status === 'running' ? { status: 'cancelled', endedAt: new Date() } : {});
     await this.ctx.runs.addAction(id, { type: 'discard', at: new Date(), ok: true });
   }
 
   async taskDiff(id: string) {
-    const run = await this.getTask(id, ['implementing', 'verifying', 'ready', 'pr_opened', 'failed']);
+    const run = await this.getTask(id, ['implementing', 'verifying', 'ready', 'pr_opened', 'applied', 'failed']);
     if (!fs.existsSync(run.task.worktree)) throw Object.assign(new Error('the task worktree no longer exists'), { statusCode: 410 });
     return (await v2.git.diffSummary(run.task.worktree)) ?? { error: 'not a git repository' };
   }
 
   async taskPatch(id: string, file?: string): Promise<string> {
-    const run = await this.getTask(id, ['implementing', 'verifying', 'ready', 'pr_opened', 'failed']);
+    const run = await this.getTask(id, ['implementing', 'verifying', 'ready', 'pr_opened', 'applied', 'failed']);
     return v2.git.diffPatch(run.task.worktree, file);
+  }
+
+  /** Scratch with a target: copies the files the agent added/changed to the target folder. Deletions are only listed. */
+  async applyToFolder(id: string): Promise<{ applied: string[]; skippedDeletes: string[] }> {
+    const run = await this.getTask(id, ['ready']);
+    const t = run.task;
+    if (t.workspace !== 'scratch' || !t.targetPath) throw Object.assign(new Error('this task has no folder to apply to'), { statusCode: 409 });
+    const plan = planApply(await diffNameStatus(t.worktree, t.base), t.targetPath);
+    for (const f of plan.copy) {
+      fs.mkdirSync(path.dirname(f.dest), { recursive: true });
+      fs.copyFileSync(path.join(t.worktree, f.rel), f.dest);
+    }
+    const applied = plan.copy.map(f => f.rel);
+    await this.setPhase(id, t, { phase: 'applied', appliedCount: applied.length });
+    await this.ctx.runs.addAction(id, { type: 'apply_to_folder', at: new Date(), ok: true, detail: `${applied.length} files` });
+    return { applied, skippedDeletes: plan.skippedDeletes };
   }
 }

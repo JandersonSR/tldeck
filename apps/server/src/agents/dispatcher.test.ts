@@ -3,7 +3,7 @@ import { parseConfig } from '../config.js';
 import { AlertHub } from '../notify/alert-hub.js';
 import { SqliteCollection } from '../store/sqlite-store.js';
 import type { DeckStore } from '../store/store.js';
-import { agentAlertText, appendPrNote, canAutoApprove, Dispatcher, isProductionBase } from './dispatcher.js';
+import { agentAlertText, appendNote, appendPrNote, canAutoApprove, Dispatcher, isProductionBase } from './dispatcher.js';
 import { RequestsRepo, type AgentRequest } from './requests-repo.js';
 
 function memoryStore() {
@@ -127,5 +127,14 @@ describe('Dispatcher.tick', () => {
     await requests.create(queued('gone', { status: 'cancelled' }));
     await d.tick();
     expect(started).toEqual([]);
+  });
+});
+
+describe('appendNote', () => {
+  it('appends a line once and respects the limit', () => {
+    expect(appendNote('feito', '\nAplicado em /x: 2 arquivo(s)')).toBe('feito\nAplicado em /x: 2 arquivo(s)');
+    const once = appendNote('x', '\nAplicado em /x: 2 arquivo(s)');
+    expect(appendNote(once, '\nAplicado em /x: 2 arquivo(s)')).toBe(once);
+    expect(appendNote('a'.repeat(1999), '\nAplicado em /x: 2 arquivo(s)').length).toBeLessThanOrEqual(2000);
   });
 });

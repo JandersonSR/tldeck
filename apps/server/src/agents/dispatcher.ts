@@ -38,6 +38,13 @@ export function appendPrNote(notes: string | undefined, url: string, max = NOTES
   return `${base.slice(0, Math.max(0, max - add.length))}${add}`.slice(0, max);
 }
 
+/** Appends a line to the activity notes, keeping them within the limit (the oldest text gives way). */
+export function appendNote(notes: string | undefined, add: string, max = NOTES_MAX): string {
+  const base = (notes ?? '').trimEnd();
+  if (base.includes(add.trim())) return base;
+  return `${base.slice(0, Math.max(0, max - add.length))}${add}`.slice(0, max);
+}
+
 /** Alert text for an agent event, in the content language. */
 export function agentAlertText(kind: AlertKind, title: string, lang: ContentLang, detail?: string): { title: string; body: string } {
   const L = (en: string, pt: string) => pick(lang, en, pt);
@@ -131,7 +138,8 @@ export class Dispatcher {
     const triage = result.ok ? result.triage : undefined;
     const probe = { ...cur, ...(triage ? { triage } : {}) };
     const name = triage ? (triage.repo ?? this.repoNameOf(probe)) : undefined;
-    const decision = decideTriage(triage, !!name && !!this.ctx.resolveRepoPath(name));
+    const repoState = !name ? 'none' : this.ctx.resolveRepoPath(name) ? 'resolved' : 'missing';
+    const decision = decideTriage(triage, repoState);
     if (decision.status === 'queued') {
       await this.requests.update(id, { status: 'queued', triage, question: '' });
       return;
@@ -190,13 +198,24 @@ export class Dispatcher {
         this.alert('agent_plan_ready', `${e.runId}:agent_plan_ready`, title, url);
         break;
       }
-      case 'failed': this.alert('agent_failed', `${e.runId}:agent_failed`, title, url, t.error); break;
+      case 'failed':
+        // The request follows its run, so "Try again" shows up for run failures too (not only start failures).
+        await this.requests.update(t.requestId, { status: 'failed', error: this.ctx.mask(t.error ?? 'agent run failed').text });
+        this.alert('agent_failed', `${e.runId}:agent_failed`, title, url, t.error);
+        break;
       case 'ready': this.alert('agent_ready', `${e.runId}:agent_ready`, title, url); break;
       case 'pr_opened':
         this.alert('agent_pr_opened', `${e.runId}:agent_pr_opened`, title, url, t.prUrl);
         if (t.prUrl) {
           const prUrl = this.ctx.mask(t.prUrl).text;
           await this.syncActivity(t.source, a => ({ notes: appendPrNote(a.notes, prUrl) }));
+        }
+        break;
+      case 'applied':
+        if (t.targetPath) {
+          const note = `
+Aplicado em ${t.targetPath}: ${t.appliedCount ?? 0} arquivo(s)`;
+          await this.syncActivity(t.source, a => ({ notes: appendNote(a.notes, note) }));
         }
         break;
       default: break;

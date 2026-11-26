@@ -2,20 +2,20 @@
 // Every step that leaves the machine (PR) asks for confirmation; discarding removes the worktree and the local branch.
 import { useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, CheckCircle2, CircleDot, ExternalLink, FileCode2, GitBranch, GitPullRequestDraft, HelpCircle, Loader2, Play, ShieldCheck, Square, Trash2, XCircle,
+  AlertTriangle, CheckCircle2, CircleDot, Copy, ExternalLink, FileCode2, FolderInput, GitBranch, GitPullRequestDraft, HelpCircle, Loader2, Play, ShieldCheck, Square, Trash2, XCircle,
 } from 'lucide-react';
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { Mono, Pill, type Tone } from '@/components/common';
 import {
-  useApproveTask, useCancelRun, useDiscardTask, useTaskDiff, useTaskPatch, useTaskPr, type Run, type TaskPhase,
+  useApplyToFolder, useApproveTask, useCancelRun, useDiscardTask, useTaskDiff, useTaskPatch, useTaskPr, type Run, type TaskPhase,
 } from '@/hooks/use-runs';
 import { ago, dur, fmtCost, fmtTok } from '@/lib/format';
 import { k, locale, t } from '@/lib/i18n';
@@ -30,6 +30,7 @@ const PHASE: Record<TaskPhase, { label: string; tone: Tone; busy?: boolean }> = 
   verifying: { label: k('verifying'), tone: 'info', busy: true },
   ready: { label: k('ready for PR'), tone: 'success' },
   pr_opened: { label: k('PR opened'), tone: 'success' },
+  applied: { label: k('Applied'), tone: 'success' },
   discarded: { label: k('discarded'), tone: 'neutral' },
   failed: { label: k('failed'), tone: 'danger' },
 };
@@ -88,6 +89,35 @@ function TaskDiff({ run }: { run: Run }) {
   );
 }
 
+/** Scratch task with a target folder: confirms which files are copied and where. */
+function ApplyDialog({ run, open, onOpenChange }: { run: Run; open: boolean; onOpenChange: (o: boolean) => void }) {
+  const diff = useTaskDiff(run._id, open);
+  const apply = useApplyToFolder();
+  const d = diff.data && !('error' in diff.data) ? diff.data : undefined;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{t('Apply the result to the folder?')}</DialogTitle>
+          <DialogDescription>{t('Files added or changed are copied over the originals. Deleted files are not removed.')}</DialogDescription>
+        </DialogHeader>
+        <p className="text-xs"><span className="text-muted-foreground">{t('Destination')}</span> <Mono className="text-[11px]">{run.task?.targetPath}</Mono></p>
+        <ul className="max-h-60 min-h-0 flex-1 space-y-px overflow-auto rounded-lg border bg-muted/30 p-2">
+          {diff.isLoading && <li><Skeleton className="h-10" /></li>}
+          {d?.files.map(f => <li key={f.path}><Mono className="text-[12px]">{f.path}</Mono></li>)}
+          {d && d.files.length === 0 && <li className="text-xs text-muted-foreground">{t('No files changed.')}</li>}
+        </ul>
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('Cancel')}</Button>
+          <Button disabled={apply.isPending || !d?.files.length} onClick={() => apply.mutate(run._id, { onSuccess: () => onOpenChange(false) })}>
+            {apply.isPending ? <Loader2 className="animate-spin" /> : <FolderInput />} {t('Apply to folder')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function TaskDetail({ run: r }: { run: Run }) {
   const task = r.task!;
   const approve = useApproveTask();
@@ -96,14 +126,16 @@ export function TaskDetail({ run: r }: { run: Run }) {
   const cancel = useCancelRun();
   const [notes, setNotes] = useState('');
   const [confirm, setConfirm] = useState<'pr' | 'discard' | null>(null);
+  const [applyOpen, setApplyOpen] = useState(false);
   const logEnd = useRef<HTMLDivElement>(null);
   const busy = r.status === 'running';
   useEffect(() => { if (busy) logEnd.current?.scrollIntoView({ block: 'end' }); }, [r.log.length, busy]);
 
   const plan = task.plan;
   const impl = task.implementation;
+  const mode = task.workspace ?? 'git';
   const canDiscard = !['pr_opened', 'discarded'].includes(task.phase);
-  const showDiff = ['ready', 'pr_opened', 'failed', 'implementing', 'verifying'].includes(task.phase) && !!task.approvedAt;
+  const showDiff = ['ready', 'pr_opened', 'applied', 'failed', 'implementing', 'verifying'].includes(task.phase) && !!task.approvedAt;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -115,7 +147,7 @@ export function TaskDetail({ run: r }: { run: Run }) {
               {t('Task')} · {r.promptVersion ?? r.model} · {t('started {time} ago', { time: ago(Date.parse(r.startedAt)) })}
               {r.usage && <> · {fmtTok(r.usage.inputTokens + r.usage.cacheReadTokens + r.usage.cacheWriteTokens)} in / {fmtTok(r.usage.outputTokens)} out · {fmtCost(r.usage.costUsd)}</>}
             </p>
-            <p className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground"><GitBranch className="size-3" /><Mono className="text-[11px]">{task.branch}</Mono> ← <Mono className="text-[11px]">{task.base}</Mono></p>
+            {mode !== 'scratch' && <p className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground"><GitBranch className="size-3" /><Mono className="text-[11px]">{task.branch}</Mono> ← <Mono className="text-[11px]">{task.base}</Mono></p>}
           </div>
           <TaskPhasePill phase={task.phase} />
         </div>
@@ -205,7 +237,25 @@ export function TaskDetail({ run: r }: { run: Run }) {
 
           {showDiff && <TaskDiff run={r} />}
 
-          {task.phase === 'ready' && (
+          {task.phase === 'ready' && mode === 'local' && (
+            <p className="text-xs text-muted-foreground">{t('No remote: the changes are in the local branch')} <Mono className="text-[11px]">{task.branch}</Mono></p>
+          )}
+          {task.phase === 'ready' && mode === 'scratch' && task.targetPath && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" onClick={() => setApplyOpen(true)}><FolderInput /> {t('Apply to folder')}</Button>
+              <span className="text-[11px] text-muted-foreground">{t('Destination')} <Mono className="text-[11px]">{task.targetPath}</Mono></span>
+            </div>
+          )}
+          {task.phase === 'ready' && mode === 'scratch' && !task.targetPath && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-muted-foreground">{t('Result in')}</span> <Mono className="text-[11px]">{task.worktree}</Mono>
+              <Button size="xs" variant="ghost" aria-label={t('Copy the path')} onClick={() => { void navigator.clipboard?.writeText(task.worktree).catch(() => undefined); }}><Copy /> {t('Copy the path')}</Button>
+            </div>
+          )}
+          {task.phase === 'applied' && (
+            <p className="text-xs text-muted-foreground">{t('Applied to {path}: {n} file(s)', { path: task.targetPath ?? '', n: task.appliedCount ?? 0 })}</p>
+          )}
+          {task.phase === 'ready' && mode === 'git' && (
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" onClick={() => setConfirm('pr')} disabled={openPr.isPending}>
                 {openPr.isPending ? <Loader2 className="animate-spin" /> : <GitPullRequestDraft />} {t('Create draft PR')}
@@ -234,6 +284,8 @@ export function TaskDetail({ run: r }: { run: Run }) {
           <pre className="whitespace-pre-wrap rounded-lg bg-muted/50 p-3 font-mono text-[11px] leading-relaxed">{r.promptMasked}</pre>
         </TabsContent>
       </Tabs>
+
+      <ApplyDialog run={r} open={applyOpen} onOpenChange={setApplyOpen} />
 
       <AlertDialog open={confirm !== null} onOpenChange={o => { if (!o) setConfirm(null); }}>
         <AlertDialogContent>

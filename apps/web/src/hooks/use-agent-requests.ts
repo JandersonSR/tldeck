@@ -21,7 +21,7 @@ export interface AgentRequest {
 }
 export interface RequestInput { source: RequestSource; prompt: string; repo?: string; autoApprovePlan?: boolean; priority?: boolean }
 /** What `GET /api/activities` attaches to each post-it. */
-export interface ActivityAgent { requestId: string; status: RequestStatus; phase?: string; runId?: string; prUrl?: string }
+export interface ActivityAgent { requestId: string; status: RequestStatus; error?: string; phase?: string; runId?: string; prUrl?: string }
 
 export const useAgentRequests = () => useQuery({
   queryKey: ['agent-requests'],
@@ -62,5 +62,23 @@ export function useCancelRequest() {
     mutationFn: (id: string) => api.post(`/api/agent-requests/${id}/cancel`),
     onSuccess: () => invalidate(),
     onError: (e: Error) => toast.error(t('Could not cancel'), { description: e.message }),
+  });
+}
+
+/** Recent requests (including failed/cancelled ones), for the retry button. */
+export const useRecentRequests = () => useQuery({
+  queryKey: ['agent-requests', 'recent'],
+  queryFn: () => api.get<{ items: AgentRequest[] }>('/api/agent-requests'),
+  refetchInterval: 10_000,
+});
+
+export function useRetryRequest() {
+  const invalidate = useInvalidate();
+  return useMutation({
+    mutationFn: (id: string) => api.post(`/api/agent-requests/${id}/retry`),
+    onSuccess: () => { invalidate(); toast.success(t('Sent again: triage started')); },
+    onError: (e: Error) => (e instanceof ApiError && e.status === 409
+      ? toast.error(t('This item is already with the agents'))
+      : toast.error(t('Could not retry'), { description: e.message })),
   });
 }

@@ -4,7 +4,7 @@ import type { RunsRepo, TaskPhase } from './runs-repo.js';
 
 export interface RunBrief { id: string; phase: TaskPhase | null; status: string; prUrl?: string | undefined }
 export type RequestView = Omit<AgentRequest, '_id'> & { _id: string; run: RunBrief | null };
-export interface ActivityAgent { requestId: string; status: RequestStatus; phase?: TaskPhase | undefined; runId?: string | undefined; prUrl?: string | undefined }
+export interface ActivityAgent { requestId: string; status: RequestStatus; error?: string | undefined; phase?: TaskPhase | undefined; runId?: string | undefined; prUrl?: string | undefined }
 
 /** Task phases that still hold the item (the run is in progress or waiting for the human). */
 export const ACTIVE_PHASES: TaskPhase[] = ['planning', 'awaiting_approval', 'implementing', 'verifying', 'ready'];
@@ -47,7 +47,7 @@ export class RequestViews {
       if (out.has(id)) continue;
       const run = await this.brief(r.runId);
       out.set(id, {
-        requestId: String(r._id), status: r.status,
+        requestId: String(r._id), status: r.status, ...(r.error ? { error: r.error } : {}),
         ...(run?.phase ? { phase: run.phase } : {}), ...(run ? { runId: run.id } : {}), ...(run?.prUrl ? { prUrl: run.prUrl } : {}),
       });
     }

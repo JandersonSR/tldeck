@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { EmptyState, Pill } from '@/components/common';
 import { DispatchButton } from '@/features/agents/dispatch-dialog';
 import { RequestStatusPill } from '@/features/agents/requests-section';
@@ -93,6 +94,12 @@ function PostIt({ a, onEdit, onOpenRun }: { a: Activity; onEdit: () => void; onO
             <RequestStatusPill status={a.agent.status} phase={a.agent.phase} />
             {a.agent.runId && onOpenRun && <Button size="xs" variant="ghost" className="h-6 px-1.5" onClick={() => onOpenRun(a.agent!.runId!)}>{t('Open run')}</Button>}
           </>
+        )}
+        {a.agent?.status === 'failed' && !done && (
+          <Tooltip>
+            <TooltipTrigger asChild><span><Pill tone="danger">{t('Failed')}</Pill></span></TooltipTrigger>
+            <TooltipContent className="max-w-xs">{a.agent.error || t('The agent run failed.')}</TooltipContent>
+          </Tooltip>
         )}
         {!done && !agentActive(a) && <DispatchButton variant="icon" source={{ kind: 'activity', id: a._id }} title={a.title} defaultPriority={a.priority} />}
         {!done

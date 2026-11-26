@@ -105,6 +105,35 @@ describe('agent requests', () => {
   });
 });
 
+describe('retry', () => {
+  it('sends a failed or cancelled request back to triage and clears the failure', async () => {
+    const act = (await post('/api/activities', { title: 'Reenviar', date: '2026-11-29' })).json().id as string;
+    const id = (await post('/api/agent-requests', { source: { kind: 'activity', id: act }, prompt: 'faça' })).json().id as string;
+    expect((await post(`/api/agent-requests/${id}/retry`, {})).statusCode).toBe(409); // still triaging
+
+    const repo = new RequestsRepo(store);
+    await repo.update(id, { status: 'failed', error: 'could not find the remote base branch', runId: 'r1' });
+    kick.mockClear();
+    expect((await post(`/api/agent-requests/${id}/retry`, {})).statusCode).toBe(200);
+    expect(kick).toHaveBeenCalled();
+    const after = (await app.inject({ url: '/api/agent-requests?active=1' })).json().items.find((i: { _id: string }) => i._id === id);
+    expect(after).toMatchObject({ status: 'triaging', error: '', run: null });
+    expect(after.triage ?? null).toBeNull();
+
+    await repo.update(id, { status: 'cancelled' });
+    expect((await post(`/api/agent-requests/${id}/retry`, {})).statusCode).toBe(200);
+  });
+
+  it('404 for an unknown request and 409 when the item already has another open request', async () => {
+    expect((await post(`/api/agent-requests/${'a'.repeat(24)}/retry`, {})).statusCode).toBe(404);
+    const act = (await post('/api/activities', { title: 'Duplicada', date: '2026-11-30' })).json().id as string;
+    const first = (await post('/api/agent-requests', { source: { kind: 'activity', id: act }, prompt: 'um' })).json().id as string;
+    await new RequestsRepo(store).update(first, { status: 'failed', error: 'x' });
+    await post('/api/agent-requests', { source: { kind: 'activity', id: act }, prompt: 'dois' });
+    expect((await post(`/api/agent-requests/${first}/retry`, {})).statusCode).toBe(409);
+  });
+});
+
 describe('alerts routes', () => {
   it('the test alert reaches the buffer and the poll returns the channel state', async () => {
     const t = await post('/api/alerts/test', {});

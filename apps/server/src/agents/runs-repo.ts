@@ -11,7 +11,7 @@ export type RunKind = 'review' | 'task';
 export type RunStatus = 'running' | 'done' | 'failed' | 'timeout' | 'cancelled';
 
 /** Task stages: plan (read-only) → approval → implementation → verification → draft PR. */
-export type TaskPhase = 'planning' | 'awaiting_approval' | 'implementing' | 'verifying' | 'ready' | 'pr_opened' | 'discarded' | 'failed';
+export type TaskPhase = 'planning' | 'awaiting_approval' | 'implementing' | 'verifying' | 'ready' | 'pr_opened' | 'applied' | 'discarded' | 'failed';
 
 export interface TaskPlan { summary: string; steps: string[]; files: string[]; tests: string[]; risks: string[]; questions: string[] }
 export interface TaskImplementation { summary: string; changes: string[]; testsRun: string[]; testsPassed: boolean | null; followUps: string[] }
@@ -28,6 +28,8 @@ export interface TaskState {
   repo: string;          // owner/name
   repoPath: string;      // clone local
   worktree: string;      // the task's isolated worktree
+  workspace?: 'git' | 'local' | 'scratch'; // absent = git (tasks from before the modes)
+  targetPath?: string;   // scratch: the folder the result can be applied to
   branch: string;
   base: string;          // branch base (ex.: origin/main)
   plan?: TaskPlan;
@@ -36,6 +38,7 @@ export interface TaskState {
   implementation?: TaskImplementation;
   verify?: TaskVerify;
   prUrl?: string;
+  appliedCount?: number; // scratch: files copied to targetPath
   error?: string;
 }
 
