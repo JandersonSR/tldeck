@@ -283,12 +283,12 @@ ${v.stderr}`.trim().slice(-6000)).text;
   async taskDiff(id: string) {
     const run = await this.getTask(id, ['implementing', 'verifying', 'ready', 'pr_opened', 'applied', 'failed']);
     if (!fs.existsSync(run.task.worktree)) throw Object.assign(new Error('the task worktree no longer exists'), { statusCode: 410 });
-    return (await v2.git.diffSummary(run.task.worktree)) ?? { error: 'not a git repository' };
+    return (await v2.git.diffSummary(run.task.worktree, run.task.base)) ?? { error: 'not a git repository' };
   }
 
   async taskPatch(id: string, file?: string): Promise<string> {
     const run = await this.getTask(id, ['implementing', 'verifying', 'ready', 'pr_opened', 'applied', 'failed']);
-    return v2.git.diffPatch(run.task.worktree, file);
+    return v2.git.diffPatch(run.task.worktree, file, run.task.base);
   }
 
   /** Scratch with a target: copies the files the agent added/changed to the target folder. Deletions are only listed. */

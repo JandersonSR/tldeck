@@ -25,6 +25,8 @@ export const PT: Record<string, string> = {
   'Agent sessions': 'Sessões de agentes',
   'Agent tests:': 'Testes do agente:',
   'Agents': 'Agentes',
+  'Deck tasks': 'Tarefas do deck',
+  'they run in Runs': 'rodam em Execuções',
   'Agents waiting on you': 'Agentes esperando você',
   'Agents, team flow, DORA, knowledge and AI quality': 'Agentes, fluxo do time, DORA, conhecimento e qualidade da IA',
   'AI quality': 'Qualidade da IA',

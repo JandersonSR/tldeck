@@ -12,12 +12,36 @@ import { usePref } from '@/lib/prefs';
 import { SessionCard } from './session-card';
 import { COLUMNS, groupByColumn, groupByTask } from './session-meta';
 import { BackgroundSessions, useBackgroundSessions } from './background-sessions';
+import { useRuns } from '@/hooks/use-runs';
+import { TaskPhasePill } from '@/features/runs/task-detail';
+
+const CLOSED = ['discarded', 'pr_opened', 'applied'];
+
+/** Deck task runs (sent to the agents or started by hand) run isolated, without hooks: they live in Runs, so link them here. */
+function DeckTasks({ onOpenRun }: { onOpenRun: (id: string) => void }) {
+  const open = (useRuns().data?.items ?? []).filter(r => r.kind === 'task' && r.task && !CLOSED.includes(r.task.phase));
+  if (!open.length) return null;
+  return (
+    <section className="rounded-xl border p-2" aria-label={t('Deck tasks')}>
+      <h2 className="px-1.5 pb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t('Deck tasks')} <span className="font-normal normal-case">· {t('they run in Runs')}</span></h2>
+      <ul className="flex flex-wrap gap-2">
+        {open.map(r => (
+          <li key={r._id}>
+            <button type="button" onClick={() => onOpenRun(r._id)} className="flex max-w-80 items-center gap-2 rounded-lg bg-muted/50 px-2 py-1.5 text-left text-xs hover:bg-muted">
+              <span className="truncate">{r.title}</span> <TaskPhasePill phase={r.task?.phase} />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 
 type ToolFilter = 'all' | 'claude' | 'cursor';
 const TOOL_LABEL: Record<Exclude<ToolFilter, 'all'>, string> = { claude: 'Claude Code', cursor: 'Cursor' };
 const toolOf = (s: { tool?: 'claude' | 'cursor' }) => s.tool ?? 'claude';
 
-export function AgentsView({ editor, onNewTask }: { editor: string; onNewTask: () => void }) {
+export function AgentsView({ editor, onNewTask, onOpenRun }: { editor: string; onNewTask: () => void; onOpenRun: (id: string) => void }) {
   const { sessions: all, flashed } = useAgentSessionsContext();
   // Claude Code and Cursor apart: the chosen tool filters the board and the task view (Background is Claude Code only).
   const [tool, setTool] = usePref<ToolFilter>('agents.tool', 'all');
@@ -56,6 +80,8 @@ export function AgentsView({ editor, onNewTask }: { editor: string; onNewTask: (
           {ended > 0 && <Button size="sm" variant="ghost" disabled={clear.isPending} onClick={() => clear.mutate()}><Eraser /> {t('Archive ended ({n})', { n: ended })}</Button>}
         </div>
       </div>
+
+      <DeckTasks onOpenRun={onOpenRun} />
 
       {layout === 'background' ? <BackgroundSessions /> : sessions.length === 0 && all.length > 0 ? (
         <div className="rounded-xl border border-dashed">

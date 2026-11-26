@@ -55,8 +55,8 @@ export interface V2DiffSummary {
   untracked: string[];
 }
 export interface V2Git {
-  diffSummary(cwd: string): Promise<V2DiffSummary | null>;
-  diffPatch(cwd: string, file?: string): Promise<string>;
+  diffSummary(cwd: string, fixedBase?: string): Promise<V2DiffSummary | null>;
+  diffPatch(cwd: string, file?: string, fixedBase?: string): Promise<string>;
   prStatus(cwd: string): Promise<unknown>;
   createPr(cwd: string): Promise<string>;
 }

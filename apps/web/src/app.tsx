@@ -190,7 +190,7 @@ export function App() {
           <main key={lang} className="min-h-0 flex-1 overflow-auto p-4 md:p-6">
             {view === 'overview' && <OverviewView goTo={goTo} />}
             {view === 'runs' && <RunsView selected={runId} onSelect={setRunId} />}
-            {view === 'agents' && <AgentsView editor={editor} onNewTask={() => setLaunch(true)} />}
+            {view === 'agents' && <AgentsView editor={editor} onNewTask={() => setLaunch(true)} onOpenRun={id => goTo('runs', id)} />}
             {view === 'activities' && <ActivitiesView notify={notifyPref === 'on'} setNotify={v => setNotifyPref(v ? 'on' : 'off')} onOpenRun={id => goTo('runs', id)} />}
             {view === 'queue' && <QueueView goTo={goTo} />}
             {view === 'deploy' && <DeployView />}
