@@ -2,21 +2,31 @@
 // independent verification → draft PR only on click.
 import fs from 'node:fs';
 import path from 'node:path';
+import type { ObjectId } from 'mongodb';
 import { z } from 'zod';
 import { v2 } from '../legacy/v2.js';
 import { execCmd } from '../util/exec.js';
 import { ALWAYS_DENIED, type AgentContext } from './context.js';
-import type { RunDoc, TaskState } from './runs-repo.js';
+import { loadKit } from './kit.js';
+import type { AgentRequest, RequestSource } from './requests-repo.js';
+import type { RunDoc, TaskPhase, TaskState } from './runs-repo.js';
 import {
-  buildImplementPrompt, buildPlanPrompt, buildPrBody, implementationTools, parseImplementation, parseIssueUrl, parsePlan,
-  PLAN_TOOLS, splitCommand, TASK_PROMPT_VERSION, taskBranch, type IssueInput,
+  buildImplementPrompt, buildPlanPrompt, buildPrBody, composeInstruction, implementationTools, parseImplementation, parseIssueUrl, parsePlan,
+  PLAN_TOOLS, requestBranch, resolveOwnerRepo, splitCommand, TASK_PROMPT_VERSION, taskBranch, type IssueInput,
 } from './task.js';
 import { commitLeftovers, commitsAhead, createWorktree, pushBranch, removeWorktree, repoInstructions } from './worktree.js';
+
+/** What the planning step needs to know about the thing to do (an issue or an activity). */
+interface PlanInput {
+  title: string; body: string; url?: string | undefined; owner: string; repo: string; number?: number | undefined;
+  userPrompt?: string | undefined; requestId?: string | undefined; source?: RequestSource | undefined;
+}
 
 export class TaskService {
   constructor(private readonly ctx: AgentContext) {}
 
-  private async fetchIssue(url: string): Promise<IssueInput & { owner: string; repo: string; number: number }> {
+  /** Reads an issue from GitHub (title/body masked). */
+  async fetchIssue(url: string): Promise<IssueInput & { owner: string; repo: string; number: number }> {
     const ref = parseIssueUrl(url);
     if (!ref) throw Object.assign(new Error('invalid issue URL'), { statusCode: 400 });
     const data = await this.ctx.requireGh().rest('GET', `/repos/${ref.owner}/${ref.repo}/issues/${ref.number}`,
@@ -37,16 +47,49 @@ export class TaskService {
   }
 
   private async taskPreviewFor(issue: Awaited<ReturnType<TaskService['fetchIssue']>>) {
-    const repoPath = this.repoPathOf(issue.repo);
-    const { hits } = await this.ctx.featMaps.search(`${issue.title} ${issue.repo}`, { repo: issue.repo, limit: 3 });
-    const ctx = await this.ctx.featContext(`${issue.title} ${issue.repo}`, issue.repo);
-    const raw = buildPlanPrompt({ issue, featContext: ctx, repoInstructions: repoInstructions(repoPath), lang: this.ctx.cfg.contentLang });
+    return this.planPreview(issue, this.repoPathOf(issue.repo));
+  }
+
+  private async planPreview(i: PlanInput, repoPath: string) {
+    const { hits } = await this.ctx.featMaps.search(`${i.title} ${i.repo}`, { repo: i.repo, limit: 3 });
+    const ctx = await this.ctx.featContext(`${i.title} ${i.repo}`, i.repo);
+    const raw = buildPlanPrompt({
+      issue: { url: i.url, title: i.title, body: i.body }, userPrompt: i.userPrompt, featContext: ctx,
+      repoInstructions: repoInstructions(repoPath), lang: this.ctx.cfg.contentLang,
+    });
     const m = this.ctx.mask(raw);
     return {
       prompt: m.text, masked: m.total, features: hits.map(h => `${h.pack.map}:${h.pack.id}`),
-      repo: `${issue.owner}/${issue.repo}`, repoPath, branch: taskBranch(issue.number, issue.title),
-      verify: this.verifyCommand(issue.repo) ?? null, title: issue.title,
+      repo: `${i.owner}/${i.repo}`, repoPath,
+      branch: i.number !== undefined ? taskBranch(i.number, i.title) : requestBranch(i.requestId ?? 'task', i.title),
+      verify: this.verifyCommand(i.repo) ?? null, title: i.title,
     };
+  }
+
+  /** Kit mode: the team playbook and subagents for the plan and implementation runs (with the Agent tool). */
+  private kitSpec(): { appendSystemPrompt?: string; agents?: NonNullable<ReturnType<typeof loadKit>>['agents'] } {
+    if (!this.ctx.cfg.agentKitMode) return {};
+    const kit = loadKit(this.ctx.cfg.paths.skillsKit);
+    if (!kit) return {};
+    return { ...(kit.claudeMd ? { appendSystemPrompt: kit.claudeMd } : {}), ...(Object.keys(kit.agents).length ? { agents: kit.agents } : {}) };
+  }
+
+  private withAgentTool(tools: string[], allowed: string[], kit: ReturnType<TaskService['kitSpec']>): { tools: string[]; allowed: string[] } {
+    return kit.agents ? { tools: [...tools, 'Agent'], allowed: [...allowed, 'Agent'] } : { tools, allowed };
+  }
+
+  /** Writes a phase change and tells the listeners (dispatcher, alerts). Returns the new task snapshot. */
+  private async setPhase(id: string, t: TaskState, patch: Partial<TaskState> & { phase: TaskPhase }, extra: Partial<RunDoc> = {}): Promise<TaskState> {
+    await this.ctx.runs.patchTask(id, patch, extra);
+    const next: TaskState = { ...t, ...patch };
+    this.ctx.phaseChanged(id, patch.phase, next);
+    return next;
+  }
+
+  /** Issue number to reference (commit, "Closes #n"): only when the issue lives in the repo the PR goes to. */
+  private issueNumberFor(t: TaskState): number | undefined {
+    const ref = t.issueUrl ? parseIssueUrl(t.issueUrl) : undefined;
+    return ref && `${ref.owner}/${ref.repo}`.toLowerCase() === t.repo.toLowerCase() ? ref.number : undefined;
   }
 
   private verifyCommand(repo: string): string | undefined {
@@ -59,31 +102,72 @@ export class TaskService {
     await this.ctx.checkLimits();
     const issue = await this.fetchIssue(input.issueUrl);
     const preview = await this.taskPreviewFor(issue);
-    const masked = this.ctx.mask(input.prompt ?? preview.prompt);
-    const model = this.ctx.cfg.agentModels.task;
-    const worktree = path.join(this.ctx.cfg.paths.worktrees, `${issue.repo}-${issue.number}-${Date.now().toString(36)}`);
+    return this.beginPlanning({
+      ...issue, url: input.issueUrl, itemKey: `gh:${issue.owner}/${issue.repo}#${issue.number}`, model: this.ctx.cfg.agentModels.task,
+      promptOverride: input.prompt, preview,
+    });
+  }
+
+  /** Starts a task from a request the human sent to the agents (the dispatcher calls it). */
+  async startFromRequest(req: AgentRequest & { _id: ObjectId }, opts: { model: string }): Promise<{ id: string }> {
+    await this.ctx.checkLimits();
+    const requestId = String(req._id);
+    const issueRef = req.source.kind === 'issue' ? parseIssueUrl(req.source.url) : undefined;
+    const repoName = req.triage?.repo ?? req.repoHint ?? issueRef?.repo;
+    if (!repoName) throw Object.assign(new Error('no repository for this request'), { statusCode: 409 });
+    const repoPath = this.repoPathOf(repoName);
+    const origin = await execCmd('git', ['remote', 'get-url', 'origin'], { cwd: repoPath });
+    const target = resolveOwnerRepo(repoName, origin.ok ? origin.stdout : undefined, this.ctx.cfg.github.org);
+    if (!target) throw Object.assign(new Error(`could not tell the GitHub owner of ${repoName} (no origin remote, no GITHUB_ORG)`), { statusCode: 409 });
+    const sameRepo = !!issueRef && `${issueRef.owner}/${issueRef.repo}`.toLowerCase() === `${target.owner}/${target.repo}`.toLowerCase();
+    const base: PlanInput = {
+      title: req.title, body: req.body, url: req.source.kind === 'issue' ? req.source.url : undefined,
+      owner: target.owner, repo: target.repo, number: sameRepo ? issueRef!.number : undefined,
+      userPrompt: composeInstruction({ userPrompt: req.userPrompt, answers: req.answers, acceptance: req.triage?.acceptance }),
+      requestId, source: req.source,
+    };
+    const preview = await this.planPreview(base, repoPath);
+    return this.beginPlanning({ ...base, itemKey: req.sourceKey, model: opts.model, preview });
+  }
+
+  /** Shared start: worktree + run document + read-only planning agent. */
+  private async beginPlanning(input: PlanInput & {
+    itemKey: string; model: string; promptOverride?: string | undefined; preview: Awaited<ReturnType<TaskService['planPreview']>>;
+  }): Promise<{ id: string }> {
+    const { preview, model } = input;
+    const masked = this.ctx.mask(input.promptOverride ?? preview.prompt);
+    const label = input.number ?? (input.requestId ?? 'task').slice(-6);
+    const worktree = path.join(this.ctx.cfg.paths.worktrees, `${input.repo}-${label}-${Date.now().toString(36)}`);
     const { base } = await createWorktree(preview.repoPath, worktree, preview.branch);
     const task: TaskState = {
-      phase: 'planning', issueUrl: input.issueUrl, issueTitle: issue.title, issueBody: issue.body,
+      phase: 'planning', issueTitle: input.title, issueBody: input.body,
+      ...(input.url ? { issueUrl: input.url } : {}),
+      ...(input.source ? { source: input.source } : {}), ...(input.requestId ? { requestId: input.requestId } : {}),
+      ...(input.userPrompt ? { userPrompt: input.userPrompt } : {}),
       repo: preview.repo, repoPath: preview.repoPath, worktree, branch: preview.branch, base,
     };
     const id = await this.ctx.runs.create({
-      kind: 'task', engine: 'claude', itemKey: `gh:${issue.owner}/${issue.repo}#${issue.number}`,
-      title: `#${issue.number} ${issue.title}`, target: { issueUrl: input.issueUrl, repo: preview.repo },
+      kind: 'task', engine: 'claude', itemKey: input.itemKey,
+      title: input.number !== undefined ? `#${input.number} ${input.title}` : input.title,
+      target: { ...(input.url ? { issueUrl: input.url } : {}), repo: preview.repo },
       status: 'running', model, promptMasked: masked.text, maskedCount: masked.total, cwd: worktree, startedAt: new Date(),
       log: [], actions: [], promptVersion: `${TASK_PROMPT_VERSION} · ${model}`,
-      promptEdited: !!input.prompt && input.prompt.trim() !== preview.prompt.trim(), task,
+      promptEdited: !!input.promptOverride && input.promptOverride.trim() !== preview.prompt.trim(), task,
     });
+    this.ctx.phaseChanged(id, 'planning', task);
+    const kit = this.kitSpec();
+    const tools = this.withAgentTool(PLAN_TOOLS.tools, PLAN_TOOLS.allowed, kit);
     this.ctx.launch(id, {
-      prompt: masked.text, cwd: worktree, model, tools: PLAN_TOOLS.tools, allowedTools: PLAN_TOOLS.allowed,
+      prompt: masked.text, cwd: worktree, model, tools: tools.tools, allowedTools: tools.allowed,
       disallowedTools: [...ALWAYS_DENIED, ...PLAN_TOOLS.denied], mcpConfig: this.ctx.mcpConfig(), timeoutMs: this.ctx.cfg.limits.timeoutMin * 60_000,
+      ...kit,
     }, async (r) => {
       const plan = r.ok ? parsePlan(r.resultText) : undefined;
       if (plan?.ok) {
-        await this.ctx.runs.patchTask(id, { phase: 'awaiting_approval', plan: plan.value }, { status: 'done', endedAt: new Date(), ...(r.usage ? { usage: r.usage } : {}) });
+        await this.setPhase(id, task, { phase: 'awaiting_approval', plan: plan.value }, { status: 'done', endedAt: new Date(), ...(r.usage ? { usage: r.usage } : {}) });
       } else {
         const error = this.ctx.mask(r.error ?? (plan && !plan.ok ? plan.error : 'failed')).text;
-        await this.ctx.runs.patchTask(id, { phase: 'failed', error }, { status: r.timedOut ? 'timeout' : r.cancelled ? 'cancelled' : 'failed', endedAt: new Date(), result: { error, text: this.ctx.mask(r.resultText).text.slice(0, 20_000) }, ...(r.usage ? { usage: r.usage } : {}) });
+        await this.setPhase(id, task, { phase: 'failed', error }, { status: r.timedOut ? 'timeout' : r.cancelled ? 'cancelled' : 'failed', endedAt: new Date(), result: { error, text: this.ctx.mask(r.resultText).text.slice(0, 20_000) }, ...(r.usage ? { usage: r.usage } : {}) });
       }
     });
     return { id };
@@ -103,34 +187,40 @@ export class TaskService {
     const t = run.task;
     const cleanNotes = notes?.trim() ? this.ctx.mask(notes.trim().slice(0, 4000)).text : undefined;
     const prompt = this.ctx.mask(buildImplementPrompt({
-      issue: { url: t.issueUrl, title: t.issueTitle, body: t.issueBody ?? '' }, plan: t.plan!, notes: cleanNotes, testCommands: this.ctx.cfg.tasks.testCommands, lang: this.ctx.cfg.contentLang,
+      issue: { url: t.issueUrl, title: t.issueTitle, body: t.issueBody ?? '' }, userPrompt: t.userPrompt, plan: t.plan!, notes: cleanNotes, testCommands: this.ctx.cfg.tasks.testCommands, lang: this.ctx.cfg.contentLang,
     })).text;
-    await this.ctx.runs.patchTask(id, { phase: 'implementing', approvedAt: new Date(), ...(cleanNotes ? { notes: cleanNotes } : {}) }, { status: 'running' });
+    let cur = await this.setPhase(id, t, { phase: 'implementing', approvedAt: new Date(), ...(cleanNotes ? { notes: cleanNotes } : {}) }, { status: 'running' });
     await this.ctx.runs.appendLog(id, [{ at: new Date(), type: 'start', text: 'plan approved — implementation' }]);
-    const tools = implementationTools(this.ctx.cfg.tasks.testCommands);
+    const impl0 = implementationTools(this.ctx.cfg.tasks.testCommands);
+    const kit = this.kitSpec();
+    const tools = this.withAgentTool(impl0.tools, impl0.allowed, kit);
     this.ctx.launch(id, {
       prompt, cwd: t.worktree, model: run.model, tools: tools.tools, allowedTools: tools.allowed,
-      disallowedTools: [...ALWAYS_DENIED, ...tools.denied], timeoutMs: this.ctx.cfg.limits.timeoutMin * 60_000,
+      disallowedTools: [...ALWAYS_DENIED, ...impl0.denied], timeoutMs: this.ctx.cfg.limits.timeoutMin * 60_000,
+      ...kit,
     }, async (r) => {
       const impl = r.ok ? parseImplementation(r.resultText) : undefined;
-      const number = Number(t.issueUrl.split('/').pop());
-      await commitLeftovers(t.worktree, `${t.issueTitle} (#${number})`);
+      const number = this.issueNumberFor(t);
+      await commitLeftovers(t.worktree, `${t.issueTitle} (${number !== undefined ? `#${number}` : (t.requestId ?? 'task').slice(-6)})`);
       const ahead = await commitsAhead(t.worktree, t.base);
       const usage = r.usage ? { usage: this.sumUsage(run.usage, r.usage) } : {};
       if (!impl?.ok || ahead === 0) {
         const error = this.ctx.mask(ahead === 0 && r.ok ? 'the agent made no changes' : r.error ?? (impl && !impl.ok ? impl.error : 'failed')).text;
-        await this.ctx.runs.patchTask(id, { phase: 'failed', error }, { status: r.timedOut ? 'timeout' : r.cancelled ? 'cancelled' : 'failed', endedAt: new Date(), ...usage });
+        await this.setPhase(id, cur, { phase: 'failed', error }, { status: r.timedOut ? 'timeout' : r.cancelled ? 'cancelled' : 'failed', endedAt: new Date(), ...usage });
         return;
       }
       const verify = this.verifyCommand(t.repo);
-      await this.ctx.runs.patchTask(id, { implementation: impl.value, phase: verify ? 'verifying' : 'ready' }, usage);
+      cur = await this.setPhase(id, cur, { implementation: impl.value, phase: verify ? 'verifying' : 'ready' }, usage);
       if (verify) {
         const started = Date.now();
         const [cmd, args] = splitCommand(verify);
         const v = await execCmd(cmd, args, { cwd: t.worktree, timeoutMs: this.ctx.cfg.limits.timeoutMin * 60_000 });
         const output = this.ctx.mask(`${v.stdout}
 ${v.stderr}`.trim().slice(-6000)).text;
-        await this.ctx.runs.patchTask(id, { phase: 'ready', verify: { command: verify, ok: v.ok, code: v.code, output, durationMs: Date.now() - started } });
+        await this.ctx.runs.patchTask(id, { verify: { command: verify, ok: v.ok, code: v.code, output, durationMs: Date.now() - started } });
+        await this.ctx.runs.finish(id, { status: 'done' });
+        await this.setPhase(id, { ...cur, verify: { command: verify, ok: v.ok, code: v.code, output, durationMs: Date.now() - started } }, { phase: 'ready' });
+        return;
       }
       await this.ctx.runs.finish(id, { status: 'done' });
     });
@@ -149,14 +239,13 @@ ${v.stderr}`.trim().slice(-6000)).text;
   async openTaskPr(id: string): Promise<{ url: string }> {
     const run = await this.getTask(id, ['ready']);
     const t = run.task;
-    const ref = parseIssueUrl(t.issueUrl)!;
     const gh = this.ctx.requireGh();
     await pushBranch(t.worktree, t.branch);
-    const pr = await gh.rest('POST', `/repos/${ref.owner}/${ref.repo}/pulls`, z.object({ html_url: z.string() }), {
+    const pr = await gh.rest('POST', `/repos/${t.repo}/pulls`, z.object({ html_url: z.string() }), {
       title: t.issueTitle, head: t.branch, base: t.base.replace(/^origin\//, ''), draft: true,
-      body: buildPrBody({ issueNumber: ref.number, plan: t.plan, impl: t.implementation, verify: t.verify, lang: this.ctx.cfg.contentLang }),
+      body: buildPrBody({ issueNumber: this.issueNumberFor(t), plan: t.plan, impl: t.implementation, verify: t.verify, lang: this.ctx.cfg.contentLang }),
     });
-    await this.ctx.runs.patchTask(id, { phase: 'pr_opened', prUrl: pr.html_url });
+    await this.setPhase(id, t, { phase: 'pr_opened', prUrl: pr.html_url });
     await this.ctx.runs.addAction(id, { type: 'draft_pr', at: new Date(), ok: true, detail: pr.html_url });
     return { url: pr.html_url };
   }
@@ -166,7 +255,7 @@ ${v.stderr}`.trim().slice(-6000)).text;
     const run = await this.getTask(id, ['planning', 'awaiting_approval', 'implementing', 'verifying', 'ready', 'failed']);
     this.ctx.cancel(id);
     await removeWorktree(run.task.repoPath, run.task.worktree, run.task.branch);
-    await this.ctx.runs.patchTask(id, { phase: 'discarded' }, run.status === 'running' ? { status: 'cancelled', endedAt: new Date() } : {});
+    await this.setPhase(id, run.task, { phase: 'discarded' }, run.status === 'running' ? { status: 'cancelled', endedAt: new Date() } : {});
     await this.ctx.runs.addAction(id, { type: 'discard', at: new Date(), ok: true });
   }
 

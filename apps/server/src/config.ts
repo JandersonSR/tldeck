@@ -91,6 +91,12 @@ const EnvSchema = z.object({
   REPOS_ROOT: optStr,
   AGENT_MODEL_REVIEW: optStr,
   AGENT_MODEL_TASK: optStr,
+  AGENT_MODEL_TRIAGE: optStr,
+  AGENT_MODEL_TASK_HIGH: optStr,
+  AGENT_KIT_MODE: z.preprocess(empty, z.enum(['on', 'off']).optional()),
+  DISPATCH_INTERVAL_SEC: intWithDefault(15, 5, 300),
+  AGENT_BOARD_DESKTOP: z.preprocess(empty, z.enum(['os', 'off']).default('os')),
+  AGENT_BOARD_TOAST_APPID: optStr,
 
   MAX_CONCURRENT_SESSIONS: intWithDefault(2, 1, 10),
   SESSION_TIMEOUT_MIN: intWithDefault(20, 1, 180),
@@ -182,7 +188,11 @@ export interface Config {
   /** Which RAG applies to which target repo (globs on the repo slug). No route = all RAGs. */
   featMapRoutes: Array<{ name: string; patterns: string[] }>;
   featContextTokens: number;
-  agentModels: { review: string; task: string };
+  agentModels: { review: string; task: string; triage: string; taskHigh: string };
+  /** Kit mode: the task agents get the kit's CLAUDE.md and subagents (SKILLS_KIT_PATH + AGENT_KIT_MODE != off). */
+  agentKitMode: boolean;
+  /** How often the dispatcher looks at the agent requests (seconds). */
+  dispatchIntervalSec: number;
   limits: { maxConcurrent: number; timeoutMin: number; maxDailyRuns: number; pollIntervalMin: number };
   maskExtraPatterns: string[];
   team: { tzOffsetMin: number; holidays: Set<string> };
@@ -198,7 +208,7 @@ export interface Config {
   /** Language of the texts the deck writes by itself (agent answers, GitHub texts, alerts, incident timelines). */
   contentLang: ContentLang;
   /** Activities (post-its): reminder hours and the optional ntfy topic (AGENT_BOARD_NTFY) that also gets them. */
-  activities: { rules: NotifyRules; ntfy: string | undefined };
+  activities: { rules: NotifyRules; ntfy: string | undefined; desktop: 'os' | 'off'; toastAppId: string | undefined };
   /** Real-time infrastructure (read-only): providers, alert thresholds and the automatic incident rule. */
   infra: {
     pollSec: number; cpuWarn: number; cpuCrit: number; memCrit: number; sustainMin: number;
@@ -294,7 +304,12 @@ function parseConfigRaw(env: NodeJS.ProcessEnv): Config {
     skills,
     featMapRoutes: pairs(e.FEAT_MAP_ROUTES, ';', '=').map(p => ({ name: p.key, patterns: list(p.value, '|') })),
     featContextTokens: e.FEAT_CONTEXT_TOKENS,
-    agentModels: { review: e.AGENT_MODEL_REVIEW ?? 'sonnet', task: e.AGENT_MODEL_TASK ?? 'sonnet' },
+    agentModels: {
+      review: e.AGENT_MODEL_REVIEW ?? 'sonnet', task: e.AGENT_MODEL_TASK ?? 'sonnet',
+      triage: e.AGENT_MODEL_TRIAGE ?? 'haiku', taskHigh: e.AGENT_MODEL_TASK_HIGH ?? 'opus',
+    },
+    agentKitMode: !!e.SKILLS_KIT_PATH && e.AGENT_KIT_MODE !== 'off',
+    dispatchIntervalSec: e.DISPATCH_INTERVAL_SEC,
     maskExtraPatterns: list(e.MASK_EXTRA_PATTERNS, ';;'),
     team: { tzOffsetMin: e.TEAM_TZ_OFFSET_MIN, holidays: new Set(list(e.HOLIDAYS)) },
     queueTypeOrder: e.QUEUE_TYPE_ORDER,
@@ -314,7 +329,7 @@ function parseConfigRaw(env: NodeJS.ProcessEnv): Config {
     dora: { failureRe: validRegex(e.DORA_FAILURE_RE) ?? DEFAULT_FAILURE_RE },
     demo: { on: e.DEMO === '1' || e.DEMO === 'true', lang: (e.DEMO_LANG ?? '').toLowerCase().startsWith('en') ? 'en' : 'pt-BR' },
     contentLang,
-    activities: { rules: parseNotifyRules(e.ACTIVITY_NOTIFY_HOURS), ntfy: e.AGENT_BOARD_NTFY },
+    activities: { rules: parseNotifyRules(e.ACTIVITY_NOTIFY_HOURS), ntfy: e.AGENT_BOARD_NTFY, desktop: e.AGENT_BOARD_DESKTOP, toastAppId: e.AGENT_BOARD_TOAST_APPID },
     infra: {
       pollSec: e.INFRA_POLL_SEC, cpuWarn: e.INFRA_CPU_WARN, cpuCrit: e.INFRA_CPU_CRIT, memCrit: e.INFRA_MEM_CRIT, sustainMin: e.INFRA_SUSTAIN_MIN,
       lang: contentLang,

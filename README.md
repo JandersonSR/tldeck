@@ -257,6 +257,19 @@ The wand on a GitHub issue in **My queue** runs a task in three gated steps:
 
 **Create draft PR** pushes the branch and opens a draft PR that closes the issue. It always asks for confirmation. **Discard** stops the agent and deletes the worktree and the local branch; the history stays in Runs.
 
+### Send to agents (your own dispatch queue)
+
+**Send to agents** (paper-plane icon) on a GitHub issue in **My queue** or on an **Activity** post-it hands the item to the agents with a short instruction from you. Nothing else ever runs: the dispatcher reads only the requests you sent (`deck_agent_requests`), never the queue, the board or GitHub.
+
+1. **Triage (Haiku, no tools).** Your instruction is trusted; the item's text is treated as data. It picks the repository, kind of work, risk, priority and acceptance criteria. If something is missing it asks you (Runs → *Agent requests*) instead of guessing.
+2. **Queue.** Your priority first, then the activity date, then the triage priority. It starts by itself when a slot is free (`MAX_CONCURRENT_SESSIONS`, daily limit `MAX_DAILY_RUNS`).
+3. **The usual task flow** (plan → approval → implementation → verification → draft PR on click). High-risk work uses `AGENT_MODEL_TASK_HIGH`. *Approve the plan automatically* only applies to low-risk work outside `production*` and `DEPLOY_PROD_BRANCHES`.
+4. An activity moves to *Doing* when the agent starts and gets the PR link in its notes. It is never marked done for you.
+
+With `SKILLS_KIT_PATH` set (and `AGENT_KIT_MODE` not `off`), runs get the kit's `claude/CLAUDE.md` and its `claude/agents/*.md` subagents, still isolated from your global settings.
+
+**Alerts** (plan ready, needs you, failed, ready, PR opened, activity reminders) go to a native desktop notification on the machine running the deck, even with the browser closed (`AGENT_BOARD_DESKTOP`), to your phone through ntfy (`AGENT_BOARD_NTFY`; ready and PR opened stay off the phone) and to the screen. With the tab open you get the in-app toast and one system popup per event. Outside the reminder hours only urgent alerts make noise. *Settings → Notifications* shows each channel and sends a test.
+
 ### AI pre-review in the team's CI (opt-in)
 
 `.github/workflows/ai-review.yml` is a reusable workflow that team repositories can call. It posts one comment per PR (updated on each push) and never approves, requests changes or pushes. The agent gets the PR and the diff in the prompt and can only read the checkout. See [docs/ci-ai-review.md](docs/ci-ai-review.md). **It sends code to the model provider, so it needs company approval** and an `ANTHROPIC_API_KEY` secret.

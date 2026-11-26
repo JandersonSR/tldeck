@@ -24,6 +24,14 @@ import { GitHubClient } from './sources/github.js';
 import { DeckStore } from './store/store.js';
 import { ActivityNotifier } from './activities/notifier.js';
 import { activitiesRoutes } from './routes/activities.js';
+import { alertsRoutes } from './routes/alerts.js';
+import { agentRequestsRoutes } from './routes/agent-requests.js';
+import { RequestsRepo } from './agents/requests-repo.js';
+import { RequestViews } from './agents/request-view.js';
+import { RunsRepo } from './agents/runs-repo.js';
+import { AlertHub } from './notify/alert-hub.js';
+import { createNtfy } from './notify/ntfy.js';
+import { createOsToast } from './notify/os-toast.js';
 
 export interface AppDeps { config: Config; store?: DeckStore; serveWeb?: boolean; startSync?: boolean }
 
@@ -74,18 +82,27 @@ export async function buildApp({ config, store = new DeckStore(config.mongo), se
   const infra = new InfraService(config, store, mask, app.log);
   await app.register(infraRoutes, { infra });
   await app.register(staffRoutes, { config, store, mask, infra });
-  const notifier = new ActivityNotifier(config, store, app.log);
-  await app.register(activitiesRoutes, { config, store, mask, notifier });
+  // Demo mode never pops native toasts or pushes to a phone.
+  const hub = new AlertHub({
+    rules: config.activities.rules, tzOffsetMin: config.team.tzOffsetMin,
+    channels: config.demo.on ? {} : { os: createOsToast(config, app.log), ntfy: createNtfy(config.activities.ntfy, app.log, config.port) },
+  });
+  await app.register(alertsRoutes, { config, hub });
+  const notifier = new ActivityNotifier(config, store, app.log, hub);
+  const views = new RequestViews(new RequestsRepo(store), new RunsRepo(store));
+  await app.register(activitiesRoutes, { config, store, mask, notifier, views });
   await app.register(claudeAgentsRoutes, { port: config.demo.on ? new DemoClaudeAgents() : new ClaudeAgents(), mask });
 
   const gh = config.github.org ? new GitHubClient({ token: config.github.token, login: config.github.login }) : undefined;
   const agents = new AgentService(config, store, gh, featMaps, mask, app.log);
   await app.register(runsRoutes, { agents });
+  const dispatcher = agents.createDispatcher(hub);
+  await app.register(agentRequestsRoutes, { store, mask, requests: agents.requests, runs: agents.runsRepo, views, tasks: agents.tasks, dispatcher });
   await app.register(peopleRoutes, { gh, org: config.github.org });
   if (startSync) app.addHook('onReady', async () => { await agents.init().catch(() => undefined); });
   if (startSync) {
-    app.addHook('onReady', async () => { sync.start(); infra.start(); notifier.start(); });
-    app.addHook('onClose', async () => { sync.stop(); infra.stop(); notifier.stop(); });
+    app.addHook('onReady', async () => { sync.start(); infra.start(); notifier.start(); if (!config.demo.on) dispatcher.start(); });
+    app.addHook('onClose', async () => { sync.stop(); infra.stop(); notifier.stop(); dispatcher.stop(); });
   }
 
   const webDist = path.join(REPO_ROOT, 'apps', 'web', 'dist');

@@ -8,7 +8,10 @@ import type { MaskResult } from '../privacy/mask.js';
 import type { GitHubClient } from '../sources/github.js';
 import type { DeckStore } from '../store/store.js';
 import { AgentContext, type Mask } from './context.js';
+import type { AlertHub } from '../notify/alert-hub.js';
+import { Dispatcher } from './dispatcher.js';
 import { EvalService } from './eval-service.js';
+import { RequestsRepo } from './requests-repo.js';
 import { ReviewService } from './review-service.js';
 import { TaskService } from './task-service.js';
 
@@ -19,15 +22,21 @@ export class AgentService {
   readonly reviews: ReviewService;
   readonly tasks: TaskService;
   readonly evals: EvalService;
+  readonly requests: RequestsRepo;
 
   constructor(cfg: Config, store: DeckStore, gh: GitHubClient | undefined, featMaps: FeatMapRegistry, mask: Mask, log: FastifyBaseLogger) {
     this.ctx = new AgentContext(cfg, store, gh, featMaps, mask, log);
     this.reviews = new ReviewService(this.ctx);
     this.tasks = new TaskService(this.ctx);
     this.evals = new EvalService(this.ctx, this.reviews);
+    this.requests = new RequestsRepo(store);
   }
 
   get running(): number { return this.ctx.active.size; }
+  get runsRepo() { return this.ctx.runs; }
+
+  /** The dispatcher of agent requests (app.ts starts and stops it). */
+  createDispatcher(hub: AlertHub): Dispatcher { return new Dispatcher(this.ctx, this.tasks, this.requests, hub, this.ctx.cfg); }
 
   async init(): Promise<void> {
     if (!this.ctx.store.configured) return;

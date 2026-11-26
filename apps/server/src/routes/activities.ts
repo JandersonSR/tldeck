@@ -3,6 +3,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { ActivityNotifier } from '../activities/notifier.js';
+import type { RequestViews } from '../agents/request-view.js';
 import type { Config } from '../config.js';
 import {
   ACTIVITY_COLORS, ACTIVITY_STATUSES, deadlineOf, isOverdue, localParts, weekRange, type Activity,
@@ -29,16 +30,16 @@ const Fields = z.object({
 const Create = Fields.partial().required({ title: true, date: true });
 const Patch = Fields.partial();
 
-export async function activitiesRoutes(app: FastifyInstance, opts: { config: Config; store: DeckStore; mask: Mask; notifier: ActivityNotifier }): Promise<void> {
-  const { config, store, notifier } = opts;
+export async function activitiesRoutes(app: FastifyInstance, opts: { config: Config; store: DeckStore; mask: Mask; notifier: ActivityNotifier; views?: RequestViews }): Promise<void> {
+  const { config, store, notifier, views } = opts;
   const repo = notifier.repo;
   const tz = config.team.tzOffsetMin;
   const m = (s: string) => opts.mask(s).text;
   const ready = async () => { if (!store.configured) return false; await store.connect(); return true; };
-  const view = (a: Activity & { _id: unknown }, today: string) => {
+  const view = (a: Activity & { _id: unknown }, today: string, agent: unknown = null) => {
     const deadline = deadlineOf(a, tz);
     return {
-      ...a, _id: String(a._id), notified: undefined,
+      ...a, _id: String(a._id), notified: undefined, agent,
       deadline: deadline === null ? null : new Date(deadline).toISOString(),
       overdue: isOverdue(a, today) || (deadline !== null && a.status !== 'done' && Date.now() >= deadline),
     };
@@ -54,7 +55,9 @@ export async function activitiesRoutes(app: FastifyInstance, opts: { config: Con
       { $or: [{ date: { $gte: from, $lte: to } }, { date: { $lt: from }, status: { $ne: 'done' } }] } as never,
       { date: 1, startTime: 1, createdAt: 1 }, 1000,
     );
-    return { configured: true, today, from, to, items: items.map(a => view(a, today)), rules: config.activities.rules, ntfy: !!config.activities.ntfy };
+    // What the agents are doing with each activity (latest request), or null.
+    const agents = views ? await views.forActivities(items.map(a => String(a._id))).catch(() => new Map()) : new Map();
+    return { configured: true, today, from, to, items: items.map(a => view(a, today, agents.get(String(a._id)) ?? null)), rules: config.activities.rules, ntfy: !!config.activities.ntfy };
   });
 
   app.post('/api/activities', async (req, reply) => {

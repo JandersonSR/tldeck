@@ -24,6 +24,20 @@ describe('buildArgs', () => {
     expect(JSON.parse(args[args.indexOf('--mcp-config') + 1]!)).toEqual({ mcpServers: { 'feat-map': { command: 'node', args: ['s.mjs'] } } });
     expect(args).not.toContain('--no-session-persistence');
   });
+
+  it('kit mode and schema flags only appear when asked', () => {
+    const base = { prompt: '', cwd: '/', model: 'm', tools: [], allowedTools: [], disallowedTools: [], timeoutMs: 1 };
+    const plain = buildArgs(base);
+    for (const f of ['--append-system-prompt', '--agents', '--json-schema']) expect(plain).not.toContain(f);
+    const agents = { implementer: { description: 'd', prompt: 'p', tools: ['Read'], model: 'sonnet' } };
+    const args = buildArgs({ ...base, appendSystemPrompt: '# Playbook', agents, jsonSchema: { type: 'object' } });
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe('# Playbook');
+    expect(JSON.parse(args[args.indexOf('--agents') + 1]!)).toEqual(agents);
+    expect(JSON.parse(args[args.indexOf('--json-schema') + 1]!)).toEqual({ type: 'object' });
+    expect(args[args.indexOf('--setting-sources') + 1]).toBe(''); // isolation kept
+    expect(args).toContain('--strict-mcp-config');
+    expect(buildArgs({ ...base, agents: {} })).not.toContain('--agents');
+  });
 });
 
 describe('parseStreamLine', () => {

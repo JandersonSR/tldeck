@@ -12,6 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { EmptyState, Mono, Pill, type Tone } from '@/components/common';
 import { useCancelRun, usePendingReview, useRun, useRuns, useSetFeedback, type FindingDecision, type Run, type Severity } from '@/hooks/use-runs';
+import { RequestsSection } from '@/features/agents/requests-section';
 import { TaskDetail, TaskPhasePill } from './task-detail';
 import { ago, dur, fmtCost, fmtTok } from '@/lib/format';
 import { k, locale, t } from '@/lib/i18n';
@@ -179,7 +180,9 @@ export function RunsView({ selected, onSelect }: { selected: string | null; onSe
   const items = q.data?.items ?? [];
   const current = selected ?? items[0]?._id ?? null;
   return (
-    <div className="grid h-full min-h-0 gap-4 lg:grid-cols-[22rem_1fr]">
+    <div className="flex h-full min-h-0 flex-col gap-4">
+    <RequestsSection onOpenRun={onSelect} />
+    <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[22rem_1fr]">
       <section className="flex min-h-0 flex-col overflow-hidden rounded-xl border bg-card shadow-xs">
         <header className="flex items-center gap-2 border-b px-3.5 py-2.5 text-[13px] font-semibold">
           <Bot className="size-4 text-muted-foreground" /> {t('Runs')}
@@ -211,6 +214,7 @@ export function RunsView({ selected, onSelect }: { selected: string | null; onSe
       <section className="min-h-[24rem] overflow-hidden rounded-xl border bg-card shadow-xs">
         {current ? <RunDetail id={current} /> : <EmptyState icon={Bot} title={t('Select a run')} />}
       </section>
+    </div>
     </div>
   );
 }

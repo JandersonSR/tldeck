@@ -7,6 +7,7 @@ import { localInstant } from '../domain/activities.js';
 import { activitiesRoutes } from '../routes/activities.js';
 import { SqliteCollection } from '../store/sqlite-store.js';
 import type { DeckStore } from '../store/store.js';
+import { AlertHub } from '../notify/alert-hub.js';
 import { ActivityNotifier } from './notifier.js';
 
 function memoryDb() {
@@ -34,7 +35,7 @@ beforeAll(async () => {
   await store.connect();
   app = Fastify();
   app.setErrorHandler((err, _req, reply) => reply.code(err instanceof ZodError ? 400 : 500).send({ error: (err as Error).message }));
-  notifier = new ActivityNotifier(config, store, app.log);
+  notifier = new ActivityNotifier(config, store, app.log, new AlertHub({ rules: config.activities.rules, tzOffsetMin: -180 }));
   await app.register(activitiesRoutes, { config, store, mask: s => ({ text: s, total: 0 }), notifier });
 });
 afterAll(async () => { await app.close(); await store.close(); });

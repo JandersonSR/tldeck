@@ -13,7 +13,7 @@ import { Kbd } from '@/components/ui/kbd';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Dot, Pill } from '@/components/common';
 import { AgentSessionsContext, useAgentSessionsStream } from '@/hooks/use-agent-sessions';
-import { useActivityAlerts } from '@/hooks/use-activities';
+import { useAlerts } from '@/hooks/use-alerts';
 import { useBoardStatus, useSyncNow } from '@/hooks/use-board';
 import { useHotkeys } from '@/hooks/use-hotkeys';
 import { useThemeAndDensity, type ThemePref } from '@/hooks/use-theme';
@@ -78,7 +78,17 @@ export function App() {
   const goTo = (v: View, id?: string) => { if (id) setRunId(id); setView(v); };
 
   const live = useAgentSessionsStream(notifyPref === 'on');
-  useActivityAlerts(notifyPref === 'on');
+  // Alert links look like "/#/runs?run=<id>": open the matching view, else the URL itself.
+  const openAlert = (url: string) => {
+    try {
+      const u = new URL(url, window.location.origin);
+      const target = /^#\/([a-z]+)/.exec(u.hash)?.[1] as View | undefined;
+      const q = new URLSearchParams(u.hash.split('?')[1] ?? '');
+      if (target && NAV.some(n => n.id === target)) { goTo(target, q.get('run') ?? undefined); return; }
+      window.open(u.toString(), '_blank', 'noopener');
+    } catch { /* URL inválida: ignora */ }
+  };
+  useAlerts(notifyPref === 'on', openAlert);
   const needs = live.sessions.filter(s => s.state === 'needs_you').length;
   const review = live.sessions.filter(s => s.state === 'review').length;
   document.title = needs + review ? `(${needs + review}) TLDeck` : 'TLDeck';
@@ -181,7 +191,7 @@ export function App() {
             {view === 'overview' && <OverviewView goTo={goTo} />}
             {view === 'runs' && <RunsView selected={runId} onSelect={setRunId} />}
             {view === 'agents' && <AgentsView editor={editor} onNewTask={() => setLaunch(true)} />}
-            {view === 'activities' && <ActivitiesView notify={notifyPref === 'on'} setNotify={v => setNotifyPref(v ? 'on' : 'off')} />}
+            {view === 'activities' && <ActivitiesView notify={notifyPref === 'on'} setNotify={v => setNotifyPref(v ? 'on' : 'off')} onOpenRun={id => goTo('runs', id)} />}
             {view === 'queue' && <QueueView goTo={goTo} />}
             {view === 'deploy' && <DeployView />}
             {view === 'metrics' && <MetricsView />}

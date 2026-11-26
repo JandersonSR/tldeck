@@ -10,10 +10,14 @@ import type { GitHubClient } from '../sources/github.js';
 import type { DeckStore } from '../store/store.js';
 import { runClaude, type RunEvent, type RunHandle } from './claude-runner.js';
 import { limitReason, startOfLocalDay } from './limits.js';
-import { RunsRepo, type RunLogEntry } from './runs-repo.js';
+import { RunsRepo, type RunLogEntry, type TaskPhase, type TaskState } from './runs-repo.js';
 
 export type Mask = (s: string) => MaskResult;
 export type RunResult = Awaited<RunHandle['promise']>;
+
+/** A task changed phase (planning, awaiting_approval, implementing, verifying, ready, pr_opened, discarded, failed). */
+export interface PhaseEvent { runId: string; phase: TaskPhase; task: TaskState }
+export type PhaseListener = (e: PhaseEvent) => void | Promise<void>;
 
 const PR_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)\/?$/;
 export function parsePrUrl(url: string): { owner: string; repo: string; number: number } | undefined {
@@ -119,6 +123,25 @@ export class AgentContext {
       await this.flush(id);
       await done(r);
     }).catch(e => this.log.error({ err: (e as Error).message }, 'failed to finish run'));
+  }
+
+  private phaseListeners: PhaseListener[] = [];
+
+  /** Subscribes to task phase changes. Returns the unsubscribe function. */
+  onPhase(listener: PhaseListener): () => void {
+    this.phaseListeners.push(listener);
+    return () => { this.phaseListeners = this.phaseListeners.filter(l => l !== listener); };
+  }
+
+  /** Tells the listeners a task changed phase. A listener failure never breaks the run. */
+  phaseChanged(runId: string, phase: TaskPhase, task: TaskState): void {
+    for (const l of this.phaseListeners) {
+      try {
+        void Promise.resolve(l({ runId, phase, task })).catch(e => this.log.warn({ err: (e as Error).message }, 'phase listener failed'));
+      } catch (e) {
+        this.log.warn({ err: (e as Error).message }, 'phase listener failed');
+      }
+    }
   }
 
   cancel(id: string): boolean {

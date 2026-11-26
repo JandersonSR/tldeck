@@ -19,6 +19,12 @@ export interface RunSpec {
   mcpConfig?: Record<string, unknown> | undefined;
   addDirs?: string[] | undefined;
   timeoutMs: number;
+  /** Text appended to the system prompt (kit mode: the team's CLAUDE.md). */
+  appendSystemPrompt?: string | undefined;
+  /** Subagents available to the Agent tool (kit mode). */
+  agents?: Record<string, { description: string; prompt: string; tools?: string[]; model?: string }> | undefined;
+  /** JSON Schema the final answer must follow (--json-schema). */
+  jsonSchema?: object | undefined;
   persistSession?: boolean;   // allows "continue in the terminal" later
 }
 
@@ -54,6 +60,9 @@ export function buildArgs(spec: RunSpec): string[] {
   if (spec.allowedTools.length) args.push('--allowedTools', ...spec.allowedTools);
   if (spec.disallowedTools.length) args.push('--disallowedTools', ...spec.disallowedTools);
   if (spec.mcpConfig) args.push('--mcp-config', JSON.stringify({ mcpServers: spec.mcpConfig }));
+  if (spec.appendSystemPrompt) args.push('--append-system-prompt', spec.appendSystemPrompt);
+  if (spec.agents && Object.keys(spec.agents).length) args.push('--agents', JSON.stringify(spec.agents));
+  if (spec.jsonSchema) args.push('--json-schema', JSON.stringify(spec.jsonSchema));
   for (const d of spec.addDirs ?? []) args.push('--add-dir', d);
   if (!spec.persistSession) args.push('--no-session-persistence');
   return args;

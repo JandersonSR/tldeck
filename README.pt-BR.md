@@ -257,6 +257,19 @@ A varinha numa issue do GitHub em **Minha fila** roda uma tarefa em três etapas
 
 **Criar PR rascunho** faz push da branch e abre um PR em rascunho que fecha a issue, sempre com confirmação. **Descartar** para o agente e apaga a worktree e a branch local; o histórico fica em Execuções.
 
+### Enviar para agentes (sua própria fila de despacho)
+
+**Enviar para agentes** (ícone de avião de papel) numa issue do GitHub em **Minha fila** ou num post-it de **Atividades** entrega o item aos agentes com uma instrução curta sua. Nada mais roda: o despachante lê só os pedidos que você enviou (`deck_agent_requests`), nunca a fila, o board ou o GitHub.
+
+1. **Triagem (Haiku, sem ferramentas).** A sua instrução é confiável; o texto do item é tratado como dado. Ela escolhe repositório, tipo de trabalho, risco, prioridade e critério de pronto. Se faltar algo, pergunta a você (Execuções → *Pedidos aos agentes*) em vez de adivinhar.
+2. **Fila.** Sua prioridade primeiro, depois a data da atividade, depois a prioridade da triagem. Começa sozinha quando abre uma vaga (`MAX_CONCURRENT_SESSIONS`, limite diário `MAX_DAILY_RUNS`).
+3. **O fluxo de tarefa de sempre** (plano → aprovação → implementação → verificação → PR rascunho com clique). Trabalho de risco alto usa `AGENT_MODEL_TASK_HIGH`. *Aprovar o plano automaticamente* só vale para risco baixo fora de `production*` e `DEPLOY_PROD_BRANCHES`.
+4. A atividade vai para *Fazendo* quando o agente começa e recebe o link do PR nas notas. Nunca é concluída automaticamente: isso é com você.
+
+Com `SKILLS_KIT_PATH` definido (e `AGENT_KIT_MODE` diferente de `off`), as execuções recebem o `claude/CLAUDE.md` do kit e os subagentes de `claude/agents/*.md`, ainda isoladas das suas configurações globais.
+
+**Alertas** (plano pronto, precisa de você, falhou, pronto, PR aberto, lembretes de atividade) vão para uma notificação nativa do sistema na máquina que roda o painel, mesmo com o navegador fechado (`AGENT_BOARD_DESKTOP`), para o celular via ntfy (`AGENT_BOARD_NTFY`; pronto e PR aberto não vão para o celular) e para a tela. Com a aba aberta você vê o toast no app e um único popup do sistema por evento. Fora do horário dos lembretes só alertas urgentes fazem barulho. *Configurações → Notificações* mostra cada canal e envia um teste.
+
 ### Pré-review por IA no CI do time (opt-in)
 
 `.github/workflows/ai-review.yml` é um workflow reutilizável que os repositórios do time podem chamar. Ele posta um comentário por PR (atualizado a cada push) e nunca aprova, pede mudanças ou faz push. O agente recebe o PR e o diff no prompt e só consegue ler o checkout. Veja [docs/ci-ai-review.md](docs/ci-ai-review.md). **Ele envia código ao provedor do modelo, então precisa de aprovação da empresa** e de um secret `ANTHROPIC_API_KEY`.

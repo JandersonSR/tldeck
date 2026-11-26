@@ -120,7 +120,7 @@ export function TaskDetail({ run: r }: { run: Run }) {
           <TaskPhasePill phase={task.phase} />
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button size="xs" variant="outline" onClick={() => window.open(task.issueUrl, '_blank', 'noopener')}><ExternalLink /> {t('Open issue')}</Button>
+          {task.issueUrl && <Button size="xs" variant="outline" onClick={() => window.open(task.issueUrl, '_blank', 'noopener')}><ExternalLink /> {t('Open issue')}</Button>}
           {task.prUrl && <Button size="xs" onClick={() => window.open(task.prUrl, '_blank', 'noopener')}><ExternalLink /> {t('Open PR')}</Button>}
           {busy && <Button size="xs" variant="outline" onClick={() => cancel.mutate(r._id)} disabled={cancel.isPending}><Square /> {t('Stop agent')}</Button>}
           {canDiscard && <Button size="xs" variant="ghost" className="text-danger" onClick={() => setConfirm('discard')} disabled={discard.isPending}><Trash2 /> {t('Discard')}</Button>}

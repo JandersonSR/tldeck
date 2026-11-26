@@ -28,7 +28,7 @@ export type FindingDecision = 'accepted' | 'rejected' | null;
 
 export type TaskPhase = 'planning' | 'awaiting_approval' | 'implementing' | 'verifying' | 'ready' | 'pr_opened' | 'discarded' | 'failed';
 export interface TaskState {
-  phase: TaskPhase; issueUrl: string; issueTitle: string; repo: string; repoPath: string; worktree: string; branch: string; base: string;
+  phase: TaskPhase; issueUrl?: string; issueTitle: string; repo: string; repoPath: string; worktree: string; branch: string; base: string;
   plan?: { summary: string; steps: string[]; files: string[]; tests: string[]; risks: string[]; questions: string[] };
   notes?: string; approvedAt?: string;
   implementation?: { summary: string; changes: string[]; testsRun: string[]; testsPassed: boolean | null; followUps: string[] };

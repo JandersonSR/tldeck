@@ -1,10 +1,10 @@
 // Activity reminders. Every minute it looks at the open activities, sends what is due (dueAlert)
 // and records the slot on the document, so a reminder never goes out twice (even after a restart).
-// Channels: the screen (polls /api/activities/alerts and shows a desktop notification) and,
-// when AGENT_BOARD_NTFY is set, an ntfy topic (phone/desktop push).
+// Delivery goes through the AlertHub (screen, native desktop toast, ntfy); /api/activities/alerts stays as an alias.
 import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config.js';
 import { addDays, alertText, dueAlert, localParts, type Activity, type AlertKind } from '../domain/activities.js';
+import { deckRoute, makeAlert, type AlertHub, type AlertKind as HubKind } from '../notify/alert-hub.js';
 import { DocRepo } from '../store/doc-repo.js';
 import type { DeckStore } from '../store/store.js';
 
@@ -27,7 +27,7 @@ export class ActivityNotifier {
   private recent: SentAlert[] = [];
   readonly repo: DocRepo<Activity>;
 
-  constructor(private readonly cfg: Config, private readonly store: DeckStore, private readonly log: FastifyBaseLogger) {
+  constructor(private readonly cfg: Config, private readonly store: DeckStore, private readonly log: FastifyBaseLogger, private readonly hub: AlertHub) {
     this.repo = new DocRepo<Activity>(store, 'deck_activities');
   }
 
@@ -65,7 +65,7 @@ export class ActivityNotifier {
           startTime: a.startTime, kind: alert.kind, at: new Date(now).toISOString(),
         };
         sent.push(s);
-        await this.push(a, alert.kind);
+        await this.push(a, alert.kind, alert.slot, now);
       }
       this.recent = [...this.recent, ...sent].slice(-KEEP);
       return sent;
@@ -74,26 +74,12 @@ export class ActivityNotifier {
     }
   }
 
-  /** ntfy (optional). The topic URL is a secret of its own: never logged. */
-  private async push(a: Activity, kind: AlertKind): Promise<void> {
-    const url = this.cfg.activities.ntfy;
-    if (!url) return;
-    try {
-      const u = new URL(url);
-      const parts = u.pathname.split('/').filter(Boolean);
-      const topic = parts.pop();
-      if (!topic) return;
-      const base = `${u.origin}/${parts.join('/')}`.replace(/\/$/, '');
-      const { title, body } = alertText(a, kind, this.cfg.contentLang === 'en' ? 'en' : 'pt-BR');
-      // JSON publishing: accepts accents in the title (HTTP headers do not).
-      await fetch(`${base}/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ topic, title, message: body, priority: kind === 'day_before' ? 3 : 4, tags: ['memo'] }),
-        signal: AbortSignal.timeout(5_000),
-      });
-    } catch {
-      this.log.warn('ntfy unreachable (activity reminder)');
-    }
+  /** Hands the reminder to the hub (screen, desktop toast, ntfy). Tag = activity + slot, so it never repeats. */
+  private async push(a: Activity & { _id: unknown }, kind: AlertKind, slot: string, now: number): Promise<void> {
+    const { title, body } = alertText(a, kind, this.cfg.contentLang === 'en' ? 'en' : 'pt-BR');
+    await this.hub.send(makeAlert({
+      kind: `activity_${kind}` as HubKind, title, body, tag: `${String(a._id)}:activity_${kind}:${slot}`,
+      url: deckRoute('activities'), at: new Date(now).toISOString(),
+    })).catch(() => this.log.warn('activity reminder delivery failed'));
   }
 }

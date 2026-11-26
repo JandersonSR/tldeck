@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import type { ActivityAgent } from '@/hooks/use-agent-requests';
 import { k, t } from '@/lib/i18n';
 
 export const ACTIVITY_STATUSES = ['todo', 'doing', 'done'] as const;
@@ -14,6 +15,7 @@ export interface Activity {
   _id: string; title: string; notes?: string; date: string; startTime?: string | null; durationHours?: number | null;
   priority: boolean; status: ActivityStatus; color: ActivityColor;
   startedAt?: string | null; doneAt?: string | null; deadline: string | null; overdue: boolean;
+  agent?: ActivityAgent | null;
   lastNotifiedAt?: string; createdAt: string; updatedAt: string;
 }
 export interface ActivityInput {

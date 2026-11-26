@@ -15,6 +15,7 @@ import { k, locale, t } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { ReviewActions } from '../runs/review-actions';
 import { TaskActions } from '../runs/task-actions';
+import { DispatchButton } from '../agents/dispatch-dialog';
 import { ActiveFilters, FilterMenu, usePeople } from '@/components/filter-menu';
 import { applyFilters, facetValues, isEmpty, useFilters, type Filterable } from '@/lib/filters';
 import type { ReviewItem, TrackedIssue } from '@/lib/board-types';
@@ -116,7 +117,7 @@ export function QueueBlock({ goTo, className }: { goTo: GoTo; className?: string
 export function QueueRow({ item: i, onStarted, extra }: { item: QueueItem; onStarted: (id: string) => void; extra?: React.ReactNode }) {
   const created = Date.parse(i.createdAt);
   const canTask = i.source === 'github' && i.kind === 'issue';
-  const trailing = canTask || extra ? <div className="flex items-center gap-1">{extra}{canTask && <TaskActions url={i.url} title={i.title} onStarted={onStarted} />}</div> : undefined;
+  const trailing = canTask || extra ? <div className="flex items-center gap-1">{extra}{canTask && <><DispatchButton source={{ kind: 'issue', url: i.url }} title={i.title} /><TaskActions url={i.url} title={i.title} onStarted={onStarted} /></>}</div> : undefined;
   return (
     <Row href={i.url} trailing={trailing}>
       <Pill tone={rankTone(i.rank)} className="w-24 justify-center truncate" title={i.type}>{i.type}</Pill>

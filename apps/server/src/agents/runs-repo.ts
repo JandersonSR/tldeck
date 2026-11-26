@@ -5,6 +5,7 @@ import type { DeckStore } from '../store/store.js';
 import type { RunUsage } from './claude-runner.js';
 import type { FindingDecision } from '../domain/review-quality.js';
 import type { ReviewResultT } from './review.js';
+import type { RequestSource } from './requests-repo.js';
 
 export type RunKind = 'review' | 'task';
 export type RunStatus = 'running' | 'done' | 'failed' | 'timeout' | 'cancelled';
@@ -18,8 +19,11 @@ export interface TaskVerify { command: string; ok: boolean; code: number | null;
 
 export interface TaskState {
   phase: TaskPhase;
-  issueUrl: string;
+  issueUrl?: string;     // absent when the task comes from an activity
   issueTitle: string;
+  source?: RequestSource;   // the agent request that started it
+  requestId?: string;
+  userPrompt?: string;      // the Tech Lead's instruction (masked)
   issueBody?: string;    // mascarado
   repo: string;          // owner/name
   repoPath: string;      // clone local
@@ -126,6 +130,13 @@ export class RunsRepo {
       { evalCaseId: { $exists: true } },
       { projection: { evalCaseId: 1, promptVersion: 1, startedAt: 1, status: 1, 'result.review.findings': 1, 'usage.costUsd': 1 } },
     ).sort({ startedAt: -1 }).limit(2000).toArray()) as RunDoc[];
+  }
+
+  /** A task run of this item that has not reached a terminal phase (it still holds the item). */
+  async activeTaskFor(itemKey: string): Promise<boolean> {
+    return (await this.col.countDocuments({
+      kind: 'task', itemKey, 'task.phase': { $in: ['planning', 'awaiting_approval', 'implementing', 'verifying', 'ready'] },
+    } as never)) > 0;
   }
 
   async countSince(since: Date): Promise<number> {

@@ -14,6 +14,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import { EmptyState, Pill } from '@/components/common';
+import { DispatchButton } from '@/features/agents/dispatch-dialog';
+import { RequestStatusPill } from '@/features/agents/requests-section';
 import {
   ACTIVITY_COLORS, ACTIVITY_STATUSES, useActivities, useDeleteActivity, useSaveActivity,
   type Activity, type ActivityColor, type ActivityInput, type ActivityStatus,
@@ -60,7 +62,10 @@ function DeadlineInfo({ a }: { a: Activity }) {
     : <span className="flex items-center gap-1 font-medium text-danger"><AlarmClock className="size-3" /> {t('Deadline reached')}</span>;
 }
 
-function PostIt({ a, onEdit }: { a: Activity; onEdit: () => void }) {
+const agentActive = (a: Activity) => !!a.agent && a.agent.status !== 'cancelled' && a.agent.status !== 'failed'
+  && !['pr_opened', 'discarded', 'failed'].includes(a.agent.phase ?? '');
+
+function PostIt({ a, onEdit, onOpenRun }: { a: Activity; onEdit: () => void; onOpenRun?: (id: string) => void }) {
   const save = useSaveActivity();
   const set = (status: ActivityStatus) => save.mutate({ id: a._id, body: { status } });
   const done = a.status === 'done';
@@ -83,6 +88,13 @@ function PostIt({ a, onEdit }: { a: Activity; onEdit: () => void }) {
           <Button size="xs" variant="ghost" className="h-6 px-1.5" disabled={save.isPending} onClick={() => set('doing')}><Play /> {t('Start')}</Button>
         )}
         {a.status === 'doing' && <Pill tone="info">{t('Doing')}</Pill>}
+        {a.agent && agentActive(a) && (
+          <>
+            <RequestStatusPill status={a.agent.status} phase={a.agent.phase} />
+            {a.agent.runId && onOpenRun && <Button size="xs" variant="ghost" className="h-6 px-1.5" onClick={() => onOpenRun(a.agent!.runId!)}>{t('Open run')}</Button>}
+          </>
+        )}
+        {!done && !agentActive(a) && <DispatchButton variant="icon" source={{ kind: 'activity', id: a._id }} title={a.title} defaultPriority={a.priority} />}
         {!done
           ? <Button size="xs" variant="ghost" className="ml-auto h-6 px-1.5" disabled={save.isPending} onClick={() => set('done')}><Check /> {t('Done')}</Button>
           : <Button size="xs" variant="ghost" className="ml-auto h-6 px-1.5" disabled={save.isPending} onClick={() => set('todo')}><Undo2 /> {t('Reopen')}</Button>}
@@ -184,7 +196,7 @@ function ActivityDialog({ activity, date, open, onOpenChange }: { activity: Acti
   );
 }
 
-export function ActivitiesView({ notify, setNotify }: { notify: boolean; setNotify: (on: boolean) => void }) {
+export function ActivitiesView({ notify, setNotify, onOpenRun }: { notify: boolean; setNotify: (on: boolean) => void; onOpenRun?: (id: string) => void }) {
   const [ref, setRef] = useState<string | undefined>(undefined);
   const q = useActivities(ref);
   const [editing, setEditing] = useState<Activity | null | undefined>(undefined);
@@ -231,7 +243,7 @@ export function ActivitiesView({ notify, setNotify }: { notify: boolean; setNoti
         <section className="rounded-xl border border-danger/30 bg-danger-soft/40 p-3">
           <h2 className="mb-2 text-xs font-semibold text-danger">{t('Still open from earlier weeks')} · {carried.length}</h2>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6">
-            {carried.map(a => <PostIt key={a._id} a={a} onEdit={() => setEditing(a)} />)}
+            {carried.map(a => <PostIt key={a._id} a={a} onEdit={() => setEditing(a)} onOpenRun={onOpenRun} />)}
           </div>
         </section>
       )}
@@ -253,7 +265,7 @@ export function ActivitiesView({ notify, setNotify }: { notify: boolean; setNoti
                   {open > 0 && <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">{open}</span>}
                   <Button size="icon-xs" variant="ghost" className={cn(open === 0 && 'ml-auto')} aria-label={t('New activity on {day}', { day: fmtDay(day) })} onClick={() => openNew(day)}><Plus /></Button>
                 </header>
-                {list.map(a => <PostIt key={a._id} a={a} onEdit={() => setEditing(a)} />)}
+                {list.map(a => <PostIt key={a._id} a={a} onEdit={() => setEditing(a)} onOpenRun={onOpenRun} />)}
                 <QuickAdd date={day} />
               </section>
             );

@@ -1,11 +1,14 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, CircleDashed, Gauge, Loader2, MinusCircle, RefreshCw, TriangleAlert, XCircle } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
+import { BellRing, CheckCircle2, CircleDashed, Gauge, Loader2, MinusCircle, RefreshCw, TriangleAlert, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { Mono } from '@/components/common';
 import type { Density, ThemePref } from '@/hooks/use-theme';
+import { useActivities } from '@/hooks/use-activities';
+import { useAlertChannels } from '@/hooks/use-alerts';
 import { api } from '@/lib/api';
 import { getLang, k, LANGS, t, type Lang } from '@/lib/i18n';
 import type { CheckState, Health } from '@/lib/types';
@@ -37,6 +40,38 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
       <div><Label className="text-sm">{t(label)}</Label>{hint && <p className="mt-0.5 text-xs text-muted-foreground">{t(hint)}</p>}</div>
       {children}
     </div>
+  );
+}
+
+function NotificationsPanel() {
+  const channels = useAlertChannels().data;
+  const ntfy = useActivities(undefined).data?.ntfy;
+  const test = useMutation({
+    mutationFn: () => api.post('/api/alerts/test'),
+    onSuccess: () => toast.success(t('Test notification sent')),
+    onError: (e: Error) => toast.error(t('Could not send'), { description: e.message }),
+  });
+  const browser = 'Notification' in window ? Notification.permission : 'denied';
+  const rows: Array<[string, boolean | undefined, string]> = [
+    [k('Native PC toast'), channels?.osToast, k('The server shows it, even with the browser closed.')],
+    [k('Phone (ntfy)'), ntfy, k('Configured on the server (NTFY_URL).')],
+    [k('Browser'), browser === 'granted', k('Used only when the PC toast is off.')],
+  ];
+  return (
+    <section className="rounded-xl border bg-card px-4 py-3 shadow-xs">
+      <h2 className="flex items-center gap-2 text-sm font-semibold"><BellRing className="size-4 text-muted-foreground" /> {t('Notifications')}</h2>
+      <ul className="mt-2 space-y-1.5 text-xs">
+        {rows.map(([label, on, hint]) => (
+          <li key={label} className="flex items-start gap-2">
+            {on ? <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-success" /> : <MinusCircle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />}
+            <span><b className="font-medium">{t(label)}</b> <span className="text-muted-foreground">· {on ? t('on') : t('off')} · {t(hint)}</span></span>
+          </li>
+        ))}
+      </ul>
+      <Button size="sm" variant="outline" className="mt-3" disabled={test.isPending} onClick={() => test.mutate()}>
+        {test.isPending ? <Loader2 className="animate-spin" /> : <BellRing />} {t('Test notification')}
+      </Button>
+    </section>
   );
 }
 
@@ -118,6 +153,8 @@ export function SettingsView(p: PrefsProps) {
             </Row>
           </div>
         </section>
+
+        <NotificationsPanel />
 
         {health.data && (
           <section className="rounded-xl border bg-card px-4 py-3 shadow-xs">
