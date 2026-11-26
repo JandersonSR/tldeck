@@ -5,6 +5,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/). Versions follow
 ## [Unreleased]
 
 ### Added
+- **Activities** (`G W`): your week as post-its, one column per day (Mon–Sun), with the open ones from earlier weeks on top. Each activity has a date, optional start time, optional deadline in hours (e.g. done within 4 h, counted from the start time or from *Start*), priority, color and notes. Priority activities get 2 reminders the day before and one every hour on the date (and after it, while overdue) until marked done; a deadline in hours alerts when it runs out. Reminders show as a toast and a desktop notification, and go to the ntfy topic when `AGENT_BOARD_NTFY` is set (`ACTIVITY_NOTIFY_HOURS` sets the hours). Stored in `deck_activities`.
+- **Share on the deploy panel:** in PRs and deploys, *Show on the deploy panel* marks an issue (and its PRs) so the shared `pr-deploy-panel` shows it next to its own issues, read-only and kept up to date by the deck. New *On the deploy panel* tab.
 - **Slack** as the team chat, instead of Discord: daily, blockers and mentions (thread answers count as answered). One chat at a time (`CHAT_PROVIDER`).
 - **Jira Cloud and Linear**, read-only: issues assigned to you in your queue, and PRs that mention an issue key grouped under that issue in PRs and deploys, with its title, state and deploy date (a Jira date field or Linear's due date). Track an issue by key or link.
 - Chat and trackers are adapters (`sources/chat.ts`, `sources/trackers.ts`); GitHub Issues and Projects keep working as before.

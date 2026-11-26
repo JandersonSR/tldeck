@@ -8,7 +8,7 @@ import { SqliteDatabase } from './sqlite-store.js';
 
 export const OWN_COLLECTIONS = [
   'deck_summaries', 'deck_runs', 'deck_prs',
-  'deck_incidents', 'deck_decisions', 'deck_initiatives', 'deck_evals', 'deck_events',
+  'deck_incidents', 'deck_decisions', 'deck_initiatives', 'deck_evals', 'deck_events', 'deck_activities',
 ] as const;
 export type OwnCollection = (typeof OWN_COLLECTIONS)[number];
 
@@ -110,7 +110,9 @@ export class DeckStore {
         { key: { linkGroup: 1 }, name: 'link_group' },
         { key: { deployDate: 1 }, name: 'deploy_date' },
         { key: { 'prs.mergedAt': 1 }, name: 'pr_merged' },
+        { key: { panelShared: 1 }, name: 'panel_shared', partialFilterExpression: { panelShared: true } },
       ]),
+      this.collection('deck_activities').createIndexes([{ key: { status: 1, date: 1 }, name: 'status_date' }, { key: { date: 1 }, name: 'date' }]),
       this.collection('deck_incidents').createIndexes([{ key: { startedAt: -1 }, name: 'started' }, { key: { status: 1 }, name: 'status' }]),
       this.collection('deck_decisions').createIndexes([
         { key: { status: 1, decideBy: 1 }, name: 'status_due' },

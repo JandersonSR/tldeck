@@ -61,6 +61,9 @@ export interface TrackedIssue {
   statusStats?: StatusStats;
   source: 'auto' | 'manual' | 'legacy';
   archived?: boolean;
+  /** Chosen to appear on the shared PR deploy panel (pr-deploy-panel reads it, never writes). */
+  panelShared?: boolean;
+  panelSharedAt?: Date | null;
   legacyId?: string;
   syncedAt?: Date;
   createdAt: Date;
@@ -234,6 +237,12 @@ export class PrsRepo {
     const { _id, ...rest } = next;
     await this.col.replaceOne({ _id: doc._id! }, rest);
     return next;
+  }
+
+  /** Shows (or hides) the issue and its PRs on the shared PR deploy panel, which reads deck_prs read-only. */
+  async setPanelShared(id: string, shared: boolean): Promise<boolean> {
+    const r = await this.col.updateOne({ _id: new ObjectId(id) }, { $set: { panelShared: shared, panelSharedAt: shared ? new Date() : null } });
+    return r.matchedCount > 0;
   }
 
   async archive(id: string, archived: boolean): Promise<boolean> {

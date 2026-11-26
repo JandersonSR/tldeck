@@ -52,6 +52,8 @@ export interface TrackedIssue {
   deployDateSource?: 'project' | 'manual' | 'legacy'; issueState?: 'OPEN' | 'CLOSED';
   status: DeployStatus; prs: TrackedPr[]; source: 'auto' | 'manual' | 'legacy'; overdue: boolean;
   syncedAt?: string; updatedAt: string; createdAt: string; mergedAt?: string | null;
+  /** Shown on the shared PR deploy panel (pr-deploy-panel). */
+  panelShared?: boolean;
   statusStats?: Partial<Record<DeployStatus, { count: number; totalMs: number }>>;
   statusHistory?: Array<{ status: DeployStatus; enteredAt: string; leftAt: string | null }>;
 }

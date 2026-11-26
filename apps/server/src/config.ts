@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { parseLang, type ContentLang } from './domain/lang.js';
 import { DEFAULT_FAILURE_RE } from './domain/dora.js';
+import { parseNotifyRules, type NotifyRules } from './domain/activities.js';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -132,6 +133,8 @@ const EnvSchema = z.object({
   GRAFANA_URL: optStr,
   GRAFANA_TOKEN: optStr,
   DEMO_LANG: optStr,
+  AGENT_BOARD_NTFY: optStr,
+  ACTIVITY_NOTIFY_HOURS: optStr,
 });
 
 export const SKILL_ROLES = ['review', 'reviewInbox', 'daily', 'dailyDigest'] as const;
@@ -194,6 +197,8 @@ export interface Config {
   demo: { on: boolean; lang: 'pt-BR' | 'en' };
   /** Language of the texts the deck writes by itself (agent answers, GitHub texts, alerts, incident timelines). */
   contentLang: ContentLang;
+  /** Activities (post-its): reminder hours and the optional ntfy topic (AGENT_BOARD_NTFY) that also gets them. */
+  activities: { rules: NotifyRules; ntfy: string | undefined };
   /** Real-time infrastructure (read-only): providers, alert thresholds and the automatic incident rule. */
   infra: {
     pollSec: number; cpuWarn: number; cpuCrit: number; memCrit: number; sustainMin: number;
@@ -309,6 +314,7 @@ function parseConfigRaw(env: NodeJS.ProcessEnv): Config {
     dora: { failureRe: validRegex(e.DORA_FAILURE_RE) ?? DEFAULT_FAILURE_RE },
     demo: { on: e.DEMO === '1' || e.DEMO === 'true', lang: (e.DEMO_LANG ?? '').toLowerCase().startsWith('en') ? 'en' : 'pt-BR' },
     contentLang,
+    activities: { rules: parseNotifyRules(e.ACTIVITY_NOTIFY_HOURS), ntfy: e.AGENT_BOARD_NTFY },
     infra: {
       pollSec: e.INFRA_POLL_SEC, cpuWarn: e.INFRA_CPU_WARN, cpuCrit: e.INFRA_CPU_CRIT, memCrit: e.INFRA_MEM_CRIT, sustainMin: e.INFRA_SUSTAIN_MIN,
       lang: contentLang,

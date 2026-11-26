@@ -46,6 +46,15 @@ export function useArchiveIssue() {
   });
 }
 
+export function usePanelShare() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, shared }: { id: string; shared: boolean }) => api.post(`/api/prs/${id}/panel`, { shared }),
+    onSuccess: (_r, v) => { invalidatePrs(qc); toast.success(t(v.shared ? 'Shown on the deploy panel' : 'Removed from the deploy panel')); },
+    onError: (e: Error) => toast.error(t('Failed'), { description: e.message }),
+  });
+}
+
 export function useSetPrStatus() {
   const qc = useQueryClient();
   return useMutation({

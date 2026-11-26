@@ -22,6 +22,8 @@ import { ClaudeAgents, DemoClaudeAgents } from './sources/claude-agents.js';
 import { peopleRoutes } from './routes/people.js';
 import { GitHubClient } from './sources/github.js';
 import { DeckStore } from './store/store.js';
+import { ActivityNotifier } from './activities/notifier.js';
+import { activitiesRoutes } from './routes/activities.js';
 
 export interface AppDeps { config: Config; store?: DeckStore; serveWeb?: boolean; startSync?: boolean }
 
@@ -72,6 +74,8 @@ export async function buildApp({ config, store = new DeckStore(config.mongo), se
   const infra = new InfraService(config, store, mask, app.log);
   await app.register(infraRoutes, { infra });
   await app.register(staffRoutes, { config, store, mask, infra });
+  const notifier = new ActivityNotifier(config, store, app.log);
+  await app.register(activitiesRoutes, { config, store, mask, notifier });
   await app.register(claudeAgentsRoutes, { port: config.demo.on ? new DemoClaudeAgents() : new ClaudeAgents(), mask });
 
   const gh = config.github.org ? new GitHubClient({ token: config.github.token, login: config.github.login }) : undefined;
@@ -80,8 +84,8 @@ export async function buildApp({ config, store = new DeckStore(config.mongo), se
   await app.register(peopleRoutes, { gh, org: config.github.org });
   if (startSync) app.addHook('onReady', async () => { await agents.init().catch(() => undefined); });
   if (startSync) {
-    app.addHook('onReady', async () => { sync.start(); infra.start(); });
-    app.addHook('onClose', async () => { sync.stop(); infra.stop(); });
+    app.addHook('onReady', async () => { sync.start(); infra.start(); notifier.start(); });
+    app.addHook('onClose', async () => { sync.stop(); infra.stop(); notifier.stop(); });
   }
 
   const webDist = path.join(REPO_ROOT, 'apps', 'web', 'dist');

@@ -76,6 +76,15 @@ export async function boardRoutes(app: FastifyInstance, opts: { sync: SyncServic
     return { ok: true };
   });
 
+  // Share (or stop sharing) the issue and its PRs on the shared PR deploy panel.
+  app.post('/api/prs/:id/panel', async (req, reply) => {
+    const { id } = z.object({ id: z.string().refine(ObjectId.isValid, 'invalid id') }).parse(req.params);
+    const { shared } = z.object({ shared: z.boolean() }).parse(req.body ?? {});
+    await store.connect();
+    if (!(await repo.setPanelShared(id, shared))) return reply.code(404).send({ error: 'not found' });
+    return { ok: true };
+  });
+
   // Manual status override of a PR (e.g. re-review). null removes the override.
   app.patch('/api/prs/:id/pr', async (req, reply) => {
     const { id } = z.object({ id: z.string().refine(ObjectId.isValid, 'invalid id') }).parse(req.params);

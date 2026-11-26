@@ -3,7 +3,7 @@
 // and updated on their own. Date, team, owner and each PR's status can be adjusted here.
 import { Fragment, useMemo, useState } from 'react';
 import {
-  AlertTriangle, Archive, Check, ChevronRight, ExternalLink, GitPullRequest, Hand, Info, Loader2, MoreHorizontal, Plus, Rocket, Undo2,
+  AlertTriangle, Archive, Check, ChevronRight, ExternalLink, GitPullRequest, Hand, Info, Loader2, MonitorUp, MoreHorizontal, Plus, Rocket, Undo2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -14,7 +14,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { EmptyState, Mono, Pill } from '@/components/common';
-import { useArchiveIssue, usePatchPr, usePrs, useSetPrStatus, useTrackIssue } from '@/hooks/use-board';
+import { useArchiveIssue, usePanelShare, usePatchPr, usePrs, useSetPrStatus, useTrackIssue } from '@/hooks/use-board';
 import { DEPLOY_STATUSES, isDone, STATUS_META, type DeployStatus, type TrackedIssue, type TrackedPr } from '@/lib/board-types';
 import { ago, dur } from '@/lib/format';
 import { k, t } from '@/lib/i18n';
@@ -23,7 +23,7 @@ import { ActiveFilters, FilterMenu, FilterSearch, usePeople } from '@/components
 import { applyFilters, facetValues, isEmpty, useFilters } from '@/lib/filters';
 import { issueFilterable } from './blocks';
 
-type Filter = 'open' | 'overdue' | DeployStatus | 'all';
+type Filter = 'open' | 'overdue' | 'panel' | DeployStatus | 'all';
 
 const DATE_SOURCE: Record<string, string> = { project: k('from the Project'), manual: k('edited on the board'), legacy: k('from the old board') };
 
@@ -124,6 +124,7 @@ export function DeployView() {
   const [filter, setFilter] = useState<Filter>('open');
   const [open, setOpen] = useState<Set<string>>(new Set());
   const archive = useArchiveIssue();
+  const share = usePanelShare();
   const q = usePrs(filter === 'all' || filter === 'merged' || filter === 'production');
   const [filters, setFilters] = useFilters('deploy');
   const people = usePeople().data;
@@ -138,13 +139,14 @@ export function DeployView() {
     const all = filtered;
     if (filter === 'open') return all.filter(i => !isDone(i.status));
     if (filter === 'overdue') return all.filter(i => i.overdue);
+    if (filter === 'panel') return all.filter(i => i.panelShared);
     if (filter === 'all') return all;
     return all.filter(i => i.status === filter);
   }, [filtered, filter]);
   const counts = useMemo(() => {
     const all = filtered;
     const by = Object.fromEntries(DEPLOY_STATUSES.map(s => [s, all.filter(i => i.status === s).length])) as Record<DeployStatus, number>;
-    return { open: all.filter(i => !isDone(i.status)).length, overdue: all.filter(i => i.overdue).length, by };
+    return { open: all.filter(i => !isDone(i.status)).length, overdue: all.filter(i => i.overdue).length, panel: all.filter(i => i.panelShared).length, by };
   }, [filtered]);
   const toggle = (id: string) => setOpen(s => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
@@ -173,6 +175,7 @@ export function DeployView() {
         <TabsList className="h-auto flex-wrap">
           <TabsTrigger value="open">{t('In progress')} <Pill className="ml-1">{counts.open}</Pill></TabsTrigger>
           <TabsTrigger value="overdue">{t('Overdue')} {counts.overdue > 0 && <Pill tone="danger" className="ml-1">{counts.overdue}</Pill>}</TabsTrigger>
+          <TabsTrigger value="panel"><MonitorUp className="size-3.5" /> {t('On the deploy panel')} {counts.panel > 0 && <Pill tone="info" className="ml-1">{counts.panel}</Pill>}</TabsTrigger>
           {DEPLOY_STATUSES.map(s => (
             <TabsTrigger key={s} value={s}>{t(STATUS_META[s].label)}{!isDone(s) && counts.by[s] > 0 && <Pill tone={STATUS_META[s].tone} className="ml-1">{counts.by[s]}</Pill>}</TabsTrigger>
           ))}
@@ -215,6 +218,7 @@ export function DeployView() {
                               {i.reference && <Mono className="text-[10px]">#{i.reference.split('/').pop()}</Mono>}
                               {i.source === 'legacy' && ` · ${t('migrated')}`}{i.source === 'manual' && ` · ${t('added here')}`}
                               {i.issueState === 'CLOSED' && ` · ${t('issue closed')}`}
+                              {i.panelShared && <span className="ml-1 inline-flex items-center gap-0.5 text-info"><MonitorUp className="size-3" /> {t('on the deploy panel')}</span>}
                             </span>
                           </td>
                           <td className="px-2"><Pill tone={STATUS_META[i.status].tone}>{t(STATUS_META[i.status].label)}</Pill></td>
@@ -235,6 +239,13 @@ export function DeployView() {
                               <DropdownMenuTrigger asChild><Button size="icon-xs" variant="ghost" aria-label={t('More actions')}><MoreHorizontal /></Button></DropdownMenuTrigger>
                               <DropdownMenuContent align="end">
                                 {i.reference && <DropdownMenuItem onSelect={() => window.open(i.reference, '_blank', 'noopener')}><ExternalLink /> {t('Open issue')}</DropdownMenuItem>}
+                                {i.panelShared
+                                  ? <DropdownMenuItem onSelect={() => share.mutate({ id: i._id, shared: false })}><MonitorUp /> {t('Remove from the deploy panel')}</DropdownMenuItem>
+                                  : (
+                                    <DropdownMenuItem disabled={!i.deployDate} onSelect={() => share.mutate({ id: i._id, shared: true })}>
+                                      <MonitorUp /> {t(i.deployDate ? 'Show on the deploy panel' : 'Show on the deploy panel (set a deploy date first)')}
+                                    </DropdownMenuItem>
+                                  )}
                                 <DropdownMenuItem onSelect={() => archive.mutate({ id: i._id, archived: true })}><Archive /> {t('Stop tracking')}</DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>
