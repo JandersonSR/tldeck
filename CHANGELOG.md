@@ -13,6 +13,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/). Versions follow
 - **Slack** as the team chat, instead of Discord: daily, blockers and mentions (thread answers count as answered). One chat at a time (`CHAT_PROVIDER`).
 - **Jira Cloud and Linear**, read-only: issues assigned to you in your queue, and PRs that mention an issue key grouped under that issue in PRs and deploys, with its title, state and deploy date (a Jira date field or Linear's due date). Track an issue by key or link.
 - Chat and trackers are adapters (`sources/chat.ts`, `sources/trackers.ts`); GitHub Issues and Projects keep working as before.
+
+### Fixed
+- **Infra / DigitalOcean rate limit:** the provider follows the `ratelimit-*` headers. After a 429, or with fewer than 150 requests left in the hour, it stops calling until the reset and the Infra screen keeps the last reading with a warning instead of the error. It reads less: droplet metrics every 5 min (was every poll), app health every 2 min (was 1), lists at most once a minute. With many droplets/apps, every interval stretches to stay within ~1,500 requests/hour (4× slower when the token is almost out because of other users).
 - Slack, Linear and Jira tokens are masked like the other secrets.
 - **Infra filters:** one tab per active provider (with its resource count and read health), filter by name, state (several at once) and kind, and sort by state, name, CPU or memory. Alerts and the timeline follow the chosen provider.
 - **What runs each app:** Heroku dynos per process type (how many are up, size) and DigitalOcean App Platform components (instance size and count).

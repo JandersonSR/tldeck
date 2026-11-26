@@ -4,8 +4,8 @@
 // DigitalOcean alert policies do not say what is firing; threshold alerts come from the
 // deck's own tracking (sustained CPU/memory), in tracker.ts.
 import { z } from 'zod';
-import { getJson, isScopeError, type Fetcher } from './http.js';
-import { pct, type InfraComponent, type InfraDeploy, type InfraProvider, type InfraResource, type ResourceStatus } from './types.js';
+import { getJson, InfraHttpError as HttpError, isScopeError, type Fetcher } from './http.js';
+import { pct, type InfraComponent, type InfraDeploy, type InfraProvider, type InfraResource, type InfraSnapshot, type ResourceStatus } from './types.js';
 
 const API = 'https://api.digitalocean.com';
 const Series = z.object({
@@ -126,18 +126,68 @@ export function peakPercent(s: SeriesT): number | undefined {
   return best === undefined ? undefined : pct(best);
 }
 
-/** App CPU/memory are read at most every 5 min (rate limit: 5,000 requests/hour); without monitoring:read, re-checked every 30 min. */
+/**
+ * DigitalOcean allows 5,000 requests/hour (and 250/minute) per token, shared by everything that uses the token.
+ * Base intervals for each kind of read; with many droplets/apps they stretch so the deck stays within HOURLY_BUDGET.
+ */
+const LIST_EVERY_MS = 60_000;
+const DROPLET_METRICS_EVERY_MS = 5 * 60_000;
+/** App health is the main status signal for apps. */
+const APP_HEALTH_EVERY_MS = 2 * 60_000;
+/** App CPU/memory (monitoring); without monitoring:read, re-checked every 30 min. */
 const APP_METRICS_EVERY_MS = 5 * 60_000;
 const APP_METRICS_RECHECK_MS = 30 * 60_000;
-/** App health is the main status signal: read on every poll, but not more than once a minute. */
-const APP_HEALTH_EVERY_MS = 60_000;
+/** Requests per hour the deck may spend, leaving the rest of the 5,000 to other users of the token. */
+export const HOURLY_BUDGET = 1_500;
+/** Few requests left in the hour (another user of the token is spending them): read 4× less often. */
+const LOW_REMAINING = 1_000;
+/** Almost none left: stop until the hour resets, so other users of the token are not blocked by the deck. */
+const RESERVE = 150;
+const DEFAULT_PAUSE_MS = 60_000;
+
+/** Expected requests/hour with the base intervals → factor (≥ 1) that stretches every interval. */
+export function stretchFactor(droplets: number, apps: number, lowRemaining = false): number {
+  const perHour = (2 * 3_600_000) / LIST_EVERY_MS + (3 * droplets * 3_600_000) / DROPLET_METRICS_EVERY_MS
+    + (apps * 3_600_000) / APP_HEALTH_EVERY_MS + (2 * apps * 3_600_000) / APP_METRICS_EVERY_MS;
+  return Math.max(1, perHour / HOURLY_BUDGET) * (lowRemaining ? 4 : 1);
+}
+
+/**
+ * Wraps the fetcher with DigitalOcean's rate-limit headers: after a 429 (or with almost no requests left)
+ * nothing goes out until the reset, and calls fail locally with 429 instead of spending more of the quota.
+ */
+export function rateGate(fetcher: Fetcher, clock: () => number = Date.now) {
+  const state = { remaining: undefined as number | undefined, resetAt: 0, pausedUntil: 0 };
+  const header = (res: Response, name: string) => { const v = Number(res.headers.get(name)); return res.headers.has(name) && Number.isFinite(v) ? v : undefined; };
+  const fetchGated: Fetcher = async (url, init) => {
+    if (clock() < state.pausedUntil) return new Response('{}', { status: 429 });
+    const res = await fetcher(url, init);
+    const remaining = header(res, 'ratelimit-remaining');
+    const reset = header(res, 'ratelimit-reset'); // unix seconds
+    const retryAfter = header(res, 'retry-after'); // seconds
+    if (remaining !== undefined) state.remaining = remaining;
+    if (reset !== undefined) state.resetAt = reset * 1000;
+    const resumeAt = () => Math.max(state.resetAt > clock() ? state.resetAt : 0, retryAfter !== undefined ? clock() + retryAfter * 1000 : 0) || clock() + DEFAULT_PAUSE_MS;
+    if (res.status === 429 || (remaining !== undefined && remaining <= RESERVE)) state.pausedUntil = Math.max(state.pausedUntil, resumeAt());
+    return res;
+  };
+  return {
+    fetch: fetchGated,
+    pausedUntil: () => (clock() < state.pausedUntil ? state.pausedUntil : undefined),
+    low: () => state.remaining !== undefined && state.remaining <= LOW_REMAINING && state.resetAt > clock(),
+  };
+}
+
+const hhmm = (ms: number) => new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+const pausedText = (until: number) => `rate limit: paused until ${hhmm(until)}, showing the last reading`;
 
 async function inBatches<T>(items: T[], size: number, fn: (x: T) => Promise<void>): Promise<void> {
   for (let i = 0; i < items.length; i += size) await Promise.all(items.slice(i, i + size).map(fn));
 }
 
-export function digitalOceanProvider(opts: { token: string; tag?: string | undefined; fetcher?: Fetcher }): InfraProvider {
-  const fetcher = opts.fetcher ?? fetch;
+export function digitalOceanProvider(opts: { token: string; tag?: string | undefined; fetcher?: Fetcher; clock?: () => number }): InfraProvider {
+  const gate = rateGate(opts.fetcher ?? fetch, opts.clock);
+  const fetcher = gate.fetch;
   const h = { Authorization: `Bearer ${opts.token}` };
   const range = (now: number) => `start=${Math.floor(now / 1000) - 600}&end=${Math.floor(now / 1000)}`;
   const metric = (name: string, id: number, now: number) =>
@@ -151,44 +201,61 @@ export function digitalOceanProvider(opts: { token: string; tag?: string | undef
   let appMetricsScope: boolean | null = null;
   const deploysCache = new Map<string, { sig: string; list: z.infer<typeof Deployments>['deployments'] }>();
   const healthCache = new Map<string, { at: number; comps: AppHealthComponent[] }>();
+  const dropletMetrics = new Map<number, { at: number; metrics: InfraResource['metrics'] }>();
+  type Lists = { at: number; d: z.infer<typeof Droplets>; apps: z.infer<typeof Apps>; warnings: string[] };
+  let lists: Lists | undefined;
+  let last: InfraSnapshot | undefined;
 
-  return {
-    id: 'digitalocean', label: 'DigitalOcean',
-    async poll(now) {
+  const read = async (now: number): Promise<InfraSnapshot> => {
       const resources: InfraResource[] = [];
       const deploys: InfraDeploy[] = [];
       const dropletsUrl = `${API}/v2/droplets?per_page=200${opts.tag ? `&tag_name=${encodeURIComponent(opts.tag)}` : ''}`;
       // Tokens with a custom scope (e.g. only app:read, like an App Platform watcher's) get 403 on part of the API.
       // Each part without scope becomes a warning and an empty list; it only really fails if no part can be read.
-      const warnings: string[] = [];
-      const scopeErrors: unknown[] = [];
-      const part = <T>(p: Promise<T>, what: string, scope: string, empty: T): Promise<T> => p.catch((e: unknown) => {
-        if (!isScopeError(e)) throw e;
-        scopeErrors.push(e);
-        warnings.push(`${what}: token missing scope ${scope}`);
-        return empty;
-      });
-      const [d, apps] = await Promise.all([
-        part(getJson(fetcher, dropletsUrl, h, Droplets), 'droplets', 'droplet:read', { droplets: [] }),
-        part(getJson(fetcher, `${API}/v2/apps?per_page=100`, h, Apps), 'apps', 'app:read', { apps: [] }),
-      ]);
-      if (scopeErrors.length === 2) throw scopeErrors[0];
+      // With many resources (or few requests left in the hour) every interval stretches by the same factor.
+      const k = stretchFactor(lists?.d.droplets.length ?? 0, lists?.apps.apps.length ?? 0, gate.low());
+      if (!lists || now - lists.at >= LIST_EVERY_MS * k) {
+        const listWarnings: string[] = [];
+        const scopeErrors: unknown[] = [];
+        const part = <T>(p: Promise<T>, what: string, scope: string, empty: T): Promise<T> => p.catch((e: unknown) => {
+          if (!isScopeError(e)) throw e;
+          scopeErrors.push(e);
+          listWarnings.push(`${what}: token missing scope ${scope}`);
+          return empty;
+        });
+        const [d, apps] = await Promise.all([
+          part(getJson(fetcher, dropletsUrl, h, Droplets), 'droplets', 'droplet:read', { droplets: [] }),
+          part(getJson(fetcher, `${API}/v2/apps?per_page=100`, h, Apps), 'apps', 'app:read', { apps: [] }),
+        ]);
+        if (scopeErrors.length === 2) throw scopeErrors[0];
+        lists = { at: now, d, apps, warnings: listWarnings };
+      }
+      const { d, apps } = lists;
+      const warnings: string[] = [...lists.warnings];
 
       await Promise.all(d.droplets.map(async drop => {
         const st = dropletStatus(drop.status);
         let metrics: InfraResource['metrics'];
         if (drop.status === 'active') {
-          // Without the metrics agent the series come back empty: the resource shows up without numbers.
-          const [cpu, avail, total] = await Promise.all([metric('cpu', drop.id, now), metric('memory_available', drop.id, now), metric('memory_total', drop.id, now)])
-            .catch(() => [undefined, undefined, undefined] as const);
-          metrics = { cpu: cpu ? cpuUsage(cpu) : undefined, memory: avail && total ? memoryUsage(avail, total) : undefined };
+          const cached = dropletMetrics.get(drop.id);
+          if (cached && now - cached.at < DROPLET_METRICS_EVERY_MS * k) metrics = cached.metrics;
+          else {
+            // Without the metrics agent the series come back empty: the resource shows up without numbers.
+            // A failed read (429, network) keeps the last values.
+            const got = await Promise.all([metric('cpu', drop.id, now), metric('memory_available', drop.id, now), metric('memory_total', drop.id, now)]).catch(() => null);
+            if (got) {
+              const [cpu, avail, total] = got;
+              metrics = { cpu: cpuUsage(cpu), memory: memoryUsage(avail, total) };
+              dropletMetrics.set(drop.id, { at: now, metrics });
+            } else metrics = cached?.metrics;
+          }
         }
         resources.push({ id: `digitalocean:droplet:${drop.id}`, provider: 'digitalocean', kind: 'droplet', name: drop.name, status: st.status, statusText: st.text, metrics, region: drop.region?.slug });
       }));
 
       // App CPU/memory need monitoring:read. One probe decides; a 403 turns them off (with a warning) until the next re-check.
       const live = apps.apps.filter(a => a.active_deployment);
-      const due = now - appMetricsAt >= (appMetricsScope === false ? APP_METRICS_RECHECK_MS : APP_METRICS_EVERY_MS);
+      const due = now - appMetricsAt >= (appMetricsScope === false ? APP_METRICS_RECHECK_MS : APP_METRICS_EVERY_MS * k);
       if (live.length && due) {
         appMetricsAt = now;
         const read = async (app: (typeof live)[number]) => {
@@ -216,7 +283,7 @@ export function digitalOceanProvider(opts: { token: string; tag?: string | undef
         let comps: AppHealthComponent[] = [];
         if (active) {
           const hc = healthCache.get(app.id);
-          if (hc && now - hc.at < APP_HEALTH_EVERY_MS) comps = hc.comps;
+          if (hc && now - hc.at < APP_HEALTH_EVERY_MS * k) comps = hc.comps;
           else {
             const read = await getJson(fetcher, `${API}/v2/apps/${app.id}/health`, h, AppHealth).then(r => r.app_health?.components ?? []).catch(() => null);
             if (read) { comps = read; healthCache.set(app.id, { at: now, comps }); } else comps = hc?.comps ?? [];
@@ -254,6 +321,28 @@ export function digitalOceanProvider(opts: { token: string; tag?: string | undef
         }
       });
       return { resources, alerts: [], deploys, ...(warnings.length ? { warnings } : {}) };
+  };
+
+  return {
+    id: 'digitalocean', label: 'DigitalOcean',
+    async poll(now) {
+      // Rate limited: no request goes out until the reset; the screen keeps the last reading with a warning.
+      const stale = (until: number): InfraSnapshot => {
+        if (!last) throw new HttpError(`api.digitalocean.com: rate limit, next try at ${hhmm(until)}`, 429);
+        return { ...last, warnings: [...(last.warnings ?? []), pausedText(until)] };
+      };
+      const paused = gate.pausedUntil();
+      if (paused) return stale(paused);
+      try {
+        const snap = await read(now);
+        last = snap;
+        const hit = gate.pausedUntil(); // 429 halfway: what was read stays (failed parts kept their last values)
+        return hit ? { ...snap, warnings: [...(snap.warnings ?? []), pausedText(hit)] } : snap;
+      } catch (e) {
+        const until = e instanceof HttpError && e.status === 429 ? gate.pausedUntil() : undefined;
+        if (until) return stale(until);
+        throw e;
+      }
     },
   };
 }

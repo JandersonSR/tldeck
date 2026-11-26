@@ -1,7 +1,7 @@
 // Adapters with simulated API responses (no real calls).
 import { describe, expect, it } from 'vitest';
 import { azureProvider, azureSeverity, healthStatus, resourceFromHealthId } from './azure.js';
-import { appComponents, appHealthStatus, cpuUsage, deployPhase, digitalOceanProvider, memoryUsage, peakPercent } from './digitalocean.js';
+import { appComponents, appHealthStatus, cpuUsage, deployPhase, digitalOceanProvider, HOURLY_BUDGET, memoryUsage, peakPercent, stretchFactor } from './digitalocean.js';
 import { grafanaProvider, grafanaSeverity } from './grafana.js';
 import { appStatus, dynoComponents, herokuProvider } from './heroku.js';
 import type { Fetcher } from './http.js';
@@ -209,5 +209,55 @@ describe('Grafana', () => {
     const f: Fetcher = async () => json({ message: 'unauthorized' }, 401);
     await expect(grafanaProvider({ url: 'https://g.dev', token: 'segredo123', fetcher: f }).poll(0)).rejects.toThrow(/g\.dev: token without permission/);
     await expect(grafanaProvider({ url: 'https://g.dev', token: 'segredo123', fetcher: f }).poll(0)).rejects.not.toThrow(/segredo123/);
+  });
+});
+
+describe('DigitalOcean rate limit', () => {
+  const app = { apps: [{ id: 'a1', spec: { name: 'web-prod' }, active_deployment: { id: 'd1', phase: 'ACTIVE' } }] };
+  /** Answers like DigitalOcean, with the rate-limit headers; `limited` turns every answer into 429. */
+  function api(clock: { t: number }) {
+    let limited = false; let calls = 0;
+    const reset = String(Math.floor((clock.t + 30 * 60_000) / 1000));
+    const f: Fetcher = async (url) => {
+      calls++;
+      const headers = { 'content-type': 'application/json', 'ratelimit-limit': '5000', 'ratelimit-remaining': limited ? '0' : '4000', 'ratelimit-reset': reset };
+      if (limited) return new Response('{}', { status: 429, headers });
+      const body = /\/v2\/droplets/.test(url) ? { droplets: [] } : /deployments/.test(url) ? { deployments: [] } : /health/.test(url) ? { app_health: { components: [] } } : /monitoring/.test(url) ? series([]) : app;
+      return new Response(JSON.stringify(body), { status: 200, headers });
+    };
+    return { f, calls: () => calls, limit: () => { limited = true; } };
+  }
+
+  it('after a 429 nothing goes out until the reset, and the last reading stays with a warning', async () => {
+    const clock = { t: Date.parse('2026-11-26T12:00:00Z') };
+    const a = api(clock);
+    const p = digitalOceanProvider({ token: 't', fetcher: a.f, clock: () => clock.t });
+    const first = await p.poll(clock.t);
+    expect(first.resources.map(r => r.name)).toEqual(['web-prod']);
+    a.limit();
+    clock.t += 3 * 60_000;
+    const hit = await p.poll(clock.t);
+    expect(hit.resources.map(r => r.name)).toEqual(['web-prod']);
+    expect(hit.warnings?.[0]).toMatch(/^rate limit: paused until/);
+    const before = a.calls();
+    clock.t += 10 * 60_000;
+    expect((await p.poll(clock.t)).warnings?.[0]).toMatch(/rate limit/);
+    expect(a.calls()).toBe(before); // paused: no request
+  });
+
+  it('a 429 on the first read, with nothing to show, still fails', async () => {
+    const clock = { t: 0 };
+    const a = api(clock); a.limit();
+    await expect(digitalOceanProvider({ token: 't', fetcher: a.f, clock: () => clock.t }).poll(0)).rejects.toThrow(/rate limit/);
+  });
+
+  it('intervals stretch with the fleet size so the deck stays within its hourly budget', () => {
+    expect(stretchFactor(2, 3)).toBe(1);
+    const k = stretchFactor(10, 60);
+    expect(k).toBeGreaterThan(1);
+    // requests/hour with the stretched intervals
+    const perHour = (120 + 10 * 36 + 60 * 30 + 60 * 24) / k;
+    expect(perHour).toBeCloseTo(HOURLY_BUDGET);
+    expect(stretchFactor(2, 3, true)).toBe(4);
   });
 });
