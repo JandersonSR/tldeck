@@ -116,3 +116,11 @@ export async function runTriage(ctx: AgentContext, req: AgentRequest): Promise<{
   const parsed = parseTriage(r.resultText);
   return parsed.ok ? { ok: true, triage: parsed.value } : { ok: false, error: parsed.error };
 }
+
+/** First folder under the repos root named in a text ("C:\\Users\\me\\reps\\docs\\x" or "/reps/docs" → "docs"). */
+export function folderFromText(text: string, reposRoot: string): string | undefined {
+  const root = reposRoot.split(/[\\/]/).filter(Boolean).pop();
+  if (!root) return undefined;
+  const esc = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\\\/])${esc}[\\\\/]+([\\w.-]+)`, 'i').exec(text)?.[1];
+}

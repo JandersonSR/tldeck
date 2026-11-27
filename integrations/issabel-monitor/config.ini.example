@@ -1,0 +1,57 @@
+# /etc/tldeck-monitor/config.ini  (dono asterisk, permissão 600)
+# Valores omitidos usam o padrão do coletor.
+
+[http]
+# Só a interface interna. Nunca 0.0.0.0.
+bind = 10.10.0.235
+port = 9118
+# Gerado pelo install.sh (openssl rand -hex 32). O mesmo valor vai em ISSABEL_TOKEN no TLDeck.
+token = __TOKEN__
+# Quem pode consultar: IPs, redes (CIDR) e nomes de máquina (resolvidos de novo a cada 5 min).
+# O token continua obrigatório mesmo para quem está na lista.
+allow = desktop-vmuj97q, 10.10.0.0/24
+
+[paths]
+monitor_root = /var/spool/asterisk/monitor
+log_file = /var/log/asterisk/full
+cli_socket = /var/run/asterisk/asterisk.ctl
+# Escrito pelo timer tldeck-issabel-audit (root) a cada 5 min.
+audit_file = /var/lib/tldeck-monitor/audit.txt
+
+[service]
+unit = asterisk.service
+
+[cdr]
+enabled = true
+mysql_bin = mysql
+# Usuário MySQL somente leitura (veja README). Arquivo 600, dono asterisk.
+defaults_file = /etc/tldeck-monitor/mysql.cnf
+database = asteriskcdrdb
+# Janela da comparação CDR × disco (a taxa crítica olha só a última hora).
+hours = 2
+max_rows = 20000
+# Chamadas que terminaram há menos que isso são ignoradas (arquivo ainda sendo fechado).
+grace_minutes = 2
+
+[ami]
+enabled = true
+host = 127.0.0.1
+port = 5038
+user = tldeck
+secret = __AMI_SECRET__
+# Peers/endpoints cujo nome casa com isso são ramais; os demais são troncos.
+extension_re = ^\d{2,6}$
+timeout = 8
+
+[thresholds]
+disk_warn = 80
+disk_crit = 90
+# Gravação com até esse tamanho é considerada vazia (só o cabeçalho WAV).
+empty_bytes = 44
+audit_hours = 24
+
+[intervals]
+# segundos: serviço e log / permissões, disco, CLI, AMI / CDR e auditoria
+fast = 30
+normal = 60
+slow = 300

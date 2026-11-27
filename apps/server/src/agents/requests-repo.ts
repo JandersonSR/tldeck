@@ -1,6 +1,6 @@
 // deck_agent_requests: what the human sent to the agents ("Send to agents"). The dispatcher reads ONLY this
 // collection: nothing runs unless a request exists. Every text stored here is already masked.
-import type { ObjectId } from 'mongodb';
+import { ObjectId } from 'mongodb';
 import { DocRepo } from '../store/doc-repo.js';
 import type { DeckStore } from '../store/store.js';
 
@@ -72,6 +72,12 @@ export class RequestsRepo {
   create(doc: AgentRequest): Promise<string> { return this.docs.create(doc); }
   get(id: string) { return this.docs.get(id); }
   update(id: string, set: Partial<AgentRequest>) { return this.docs.update(id, { ...set, updatedAt: new Date() }); }
+
+  /** Atomic status change: true only for the one process (or pass) that moved it from `from`. */
+  async claim(id: string, from: RequestStatus, set: Partial<AgentRequest>): Promise<boolean> {
+    const r = await this.docs.col.findOneAndUpdate({ _id: new ObjectId(id), status: from }, { $set: { ...set, updatedAt: new Date() } }, { returnDocument: 'after' });
+    return r !== null;
+  }
 
   byStatus(statuses: RequestStatus[], limit = 500) {
     return this.docs.list({ status: { $in: statuses } } as never, { createdAt: 1 }, limit);

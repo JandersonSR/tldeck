@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildTriagePrompt, decideTriage, listRepoNames, parseTriage, TRIAGE_FAILED_QUESTION, triageJsonSchema, TriageSchema } from './triage.js';
+import { buildTriagePrompt, decideTriage, folderFromText, listRepoNames, parseTriage, TRIAGE_FAILED_QUESTION, triageJsonSchema, TriageSchema } from './triage.js';
 import type { Triage } from './requests-repo.js';
 
 const ok: Triage = { executable: true, repo: 'api', flow: 'bug', risk: 'low', priority: 2, acceptance: ['teste passa'], question: null };
@@ -87,5 +87,13 @@ describe('listRepoNames', () => {
     expect(listRepoNames({ paths: { repos: [], reposRoot: path.join(root, 'missing') } } as never)).toEqual([]);
     expect(listRepoNames({ paths: { repos: [{ slug: 'a', path: '' }, { slug: 'b', path: '' }], reposRoot: root } } as never, 2)).toEqual(['a', 'b']);
     fs.rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe('folderFromText', () => {
+  it('finds the folder under the repos root in a Windows or POSIX path', () => {
+    expect(folderFromText('salvar em "C:\\Users\\agx\\reps\\capacitacao\\escuta\\Semanas"', 'C:\\Users\\agx\\reps')).toBe('capacitacao');
+    expect(folderFromText('fica em /reps/capacitacao', 'C:/Users/agx/reps')).toBe('capacitacao');
+    expect(folderFromText('sem caminho nenhum', 'C:/Users/agx/reps')).toBeUndefined();
   });
 });

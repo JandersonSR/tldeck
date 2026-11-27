@@ -138,6 +138,9 @@ const EnvSchema = z.object({
   AZURE_HEALTH_API_VERSION: optStr,
   GRAFANA_URL: optStr,
   GRAFANA_TOKEN: optStr,
+  ISSABEL_URL: optStr,
+  ISSABEL_TOKEN: optStr,
+  ISSABEL_NAME: optStr,
   DEMO_LANG: optStr,
   AGENT_BOARD_NTFY: optStr,
   ACTIVITY_NOTIFY_HOURS: optStr,
@@ -217,6 +220,7 @@ export interface Config {
     heroku?: { token: string; apps: string[] } | undefined;
     azure?: { tenantId: string; clientId: string; clientSecret: string; subscriptionId: string; healthApiVersion?: string | undefined } | undefined;
     grafana?: { url: string; token: string } | undefined;
+    issabel?: { url: string; token: string; name: string } | undefined;
   };
 }
 
@@ -340,6 +344,7 @@ function parseConfigRaw(env: NodeJS.ProcessEnv): Config {
         ? { tenantId: e.AZURE_TENANT_ID, clientId: e.AZURE_CLIENT_ID, clientSecret: e.AZURE_CLIENT_SECRET, subscriptionId: e.AZURE_SUBSCRIPTION_ID, healthApiVersion: e.AZURE_HEALTH_API_VERSION }
         : undefined,
       grafana: e.GRAFANA_URL && e.GRAFANA_TOKEN ? { url: e.GRAFANA_URL, token: e.GRAFANA_TOKEN } : undefined,
+      issabel: e.ISSABEL_URL && e.ISSABEL_TOKEN ? { url: e.ISSABEL_URL, token: e.ISSABEL_TOKEN, name: e.ISSABEL_NAME ?? 'issabel-prod' } : undefined,
     },
   };
 }
@@ -354,7 +359,7 @@ export function demoConfig(c: Config): Config {
     discord: { ...c.discord, token: undefined },
     slack: { ...c.slack, token: undefined },
     trackers: {},
-    infra: { ...c.infra, digitalocean: undefined, heroku: undefined, azure: undefined, grafana: undefined },
+    infra: { ...c.infra, digitalocean: undefined, heroku: undefined, azure: undefined, grafana: undefined, issabel: undefined },
     paths: { ...c.paths, featMaps: [] },
   };
 }

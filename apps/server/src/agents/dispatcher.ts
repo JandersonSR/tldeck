@@ -10,7 +10,7 @@ import type { AgentContext, PhaseEvent } from './context.js';
 import { compareRequests, type AgentRequest, type RequestsRepo } from './requests-repo.js';
 import type { TaskService } from './task-service.js';
 import { parseIssueUrl } from './task.js';
-import { decideTriage, runTriage } from './triage.js';
+import { decideTriage, folderFromText, runTriage } from './triage.js';
 
 type Req = AgentRequest & { _id: unknown };
 const NOTES_MAX = 2000;
@@ -135,7 +135,13 @@ export class Dispatcher {
     const result = await runTriage(this.ctx, req);
     const cur = await this.requests.get(id);
     if (!cur || cur.status !== 'triaging') return; // cancelled meanwhile
-    const triage = result.ok ? result.triage : undefined;
+    let triage = result.ok ? result.triage : undefined;
+    // The human named a folder under REPOS_ROOT ("...\reps\capacitacao\..."): that is the target, even for non-code work.
+    if (triage && !triage.repo) {
+      const folder = folderFromText(`${cur.userPrompt}
+${cur.body}`, this.cfg.paths.reposRoot);
+      if (folder && this.ctx.resolveRepoPath(folder)) triage = { ...triage, repo: folder };
+    }
     const probe = { ...cur, ...(triage ? { triage } : {}) };
     const name = triage ? (triage.repo ?? this.repoNameOf(probe)) : undefined;
     const repoState = !name ? 'none' : this.ctx.resolveRepoPath(name) ? 'resolved' : 'missing';
@@ -160,12 +166,14 @@ export class Dispatcher {
       if (!next) return;
       const id = String(next._id);
       const model = next.triage?.risk === 'high' ? this.cfg.agentModels.taskHigh : this.cfg.agentModels.task;
+      // Claim first: another deck process on the same store (or a later pass) must not start it too.
+      if (!(await this.requests.claim(id, 'queued', { status: 'dispatched' }))) continue;
       try {
         const { id: runId } = await this.tasks.startFromRequest(next, { model });
         await this.requests.update(id, { status: 'dispatched', runId });
       } catch (e) {
         const err = e as Error & { statusCode?: number };
-        if (err.statusCode === 429) return; // limit reached: stays queued
+        if (err.statusCode === 429) { await this.requests.update(id, { status: 'queued' }); return; } // limit reached: back in the queue
         const error = this.ctx.mask(err.message || 'failed to start').text;
         await this.requests.update(id, { status: 'failed', error });
         this.alert('agent_failed', `${id}:agent_failed`, next.title, deckRoute('runs'), error);

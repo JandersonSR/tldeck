@@ -8,22 +8,26 @@ import { parseJsonBlock } from './review.js';
 /** Bump it when changing the task prompts (to compare results across versions). */
 export const TASK_PROMPT_VERSION = 't3';
 
+// Long answers are clipped, not rejected: a plan with a 700-char step is still a plan (rejecting it wasted the run).
+const clip = (n: number) => z.string().transform(s => (s.length > n ? `${s.slice(0, n - 1)}…` : s));
+const clipList = (n: number, max: number) => z.array(clip(n)).default([]).transform(a => a.slice(0, max));
+
 export const TaskPlan = z.object({
-  summary: z.string().max(4000),
-  steps: z.array(z.string().max(600)).max(30).default([]),
-  files: z.array(z.string().max(400)).max(60).default([]),
-  tests: z.array(z.string().max(600)).max(30).default([]),
-  risks: z.array(z.string().max(600)).max(20).default([]),
-  questions: z.array(z.string().max(600)).max(20).default([]),
+  summary: clip(4000),
+  steps: clipList(1500, 30),
+  files: clipList(400, 60),
+  tests: clipList(1000, 30),
+  risks: clipList(1000, 20),
+  questions: clipList(1000, 20),
 });
 export type TaskPlanT = z.infer<typeof TaskPlan>;
 
 export const TaskImplementation = z.object({
-  summary: z.string().max(4000),
-  changes: z.array(z.string().max(600)).max(60).default([]),
-  testsRun: z.array(z.string().max(300)).max(20).default([]),
+  summary: clip(4000),
+  changes: clipList(1500, 60),
+  testsRun: clipList(300, 20),
   testsPassed: z.boolean().nullable().default(null),
-  followUps: z.array(z.string().max(600)).max(20).default([]),
+  followUps: clipList(1500, 20),
 });
 export type TaskImplementationT = z.infer<typeof TaskImplementation>;
 

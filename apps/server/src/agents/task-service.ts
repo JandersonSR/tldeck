@@ -57,8 +57,9 @@ export class TaskService {
   /** repoPath is absent for requests with no repository (research, drafts): the featContext is then searched without a repo. */
   private async planPreview(i: PlanInput, repoPath: string | undefined, ws: Workspace) {
     const scope = repoPath ? i.repo : '';
-    const { hits } = await this.ctx.featMaps.search(`${i.title} ${scope}`.trim(), { repo: scope, limit: 3 });
-    const ctx = await this.ctx.featContext(`${i.title} ${scope}`.trim(), scope);
+    // No repo (research, drafts, a docs folder): a feat-map search by title only brings unrelated packs.
+    const hits = scope ? (await this.ctx.featMaps.search(`${i.title} ${scope}`, { repo: scope, limit: 3 })).hits : [];
+    const ctx = scope ? await this.ctx.featContext(`${i.title} ${scope}`, scope) : undefined;
     const raw = buildPlanPrompt({
       issue: { url: i.url, title: i.title, body: i.body }, userPrompt: i.userPrompt, featContext: ctx,
       repoInstructions: (ws.workspace === 'scratch' ? ws.targetPath : repoPath) ? repoInstructions((ws.workspace === 'scratch' ? ws.targetPath : repoPath)!) : undefined,

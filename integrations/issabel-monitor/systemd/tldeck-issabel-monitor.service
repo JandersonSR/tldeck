@@ -1,0 +1,42 @@
+[Unit]
+Description=TLDeck Issabel monitor (somente leitura)
+Documentation=file:///opt/tldeck-monitor/README.md
+After=network-online.target asterisk.service mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Roda como asterisk: o teste de escrita enxerga exatamente o que o MixMonitor enxerga.
+User=asterisk
+Group=asterisk
+Environment=LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/libexec/platform-python /opt/tldeck-monitor/tldeck_issabel_monitor.py --config /etc/tldeck-monitor/config.ini
+Restart=on-failure
+RestartSec=10
+
+# Leve: não disputa CPU/disco com as chamadas.
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=10%
+MemoryLimit=64M
+TasksMax=32
+
+# Somente leitura em todo o sistema; a única escrita possível é o arquivo de teste
+# (criado e apagado na hora) dentro da pasta de gravações, sujeito às permissões normais.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/spool/asterisk/monitor
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

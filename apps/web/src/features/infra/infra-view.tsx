@@ -33,7 +33,7 @@ const NO_METRICS_HINT: Record<string, string> = {
 };
 
 type ProviderView = InfraData['providers'][number];
-const PROVIDER_LABEL: Record<string, string> = { digitalocean: 'DigitalOcean', heroku: 'Heroku', azure: 'Azure', grafana: 'Grafana' };
+const PROVIDER_LABEL: Record<string, string> = { digitalocean: 'DigitalOcean', heroku: 'Heroku', azure: 'Azure', grafana: 'Grafana', issabel: 'Issabel' };
 interface ProviderTab { id: string; label: string; state?: ProviderView }
 const providerTone = (p?: ProviderView): Tone => (!p ? 'success' : p.ok === false ? 'danger' : p.ok && p.warning ? 'warning' : p.ok ? 'success' : 'neutral');
 
@@ -97,6 +97,17 @@ function ResourceCard({ r, cpuCrit, memCrit }: { r: InfraResourceView; cpuCrit: 
         <ul className="mt-2 space-y-0.5 border-t pt-2">
           {r.components.slice(0, 4).map(c => <ComponentLine key={c.type} c={c} />)}
           {r.components.length > 4 && <li className="text-[11px] text-muted-foreground">{t('+{n} more', { n: r.components.length - 4 })}</li>}
+        </ul>
+      )}
+      {!!r.details?.length && (
+        <ul className="mt-2 space-y-1 border-t pt-2" data-testid="infra-details">
+          {r.details.map(x => (
+            <li key={x.label} className="flex items-start gap-1.5 text-[11px]">
+              <Dot tone={STATUS[x.status].tone} className="mt-1" />
+              <span className="shrink-0 text-muted-foreground">{x.label}</span>
+              <span className={cn('min-w-0 flex-1 text-right break-words', x.status === 'down' && 'font-semibold text-destructive', x.status === 'warn' && 'text-warning')}>{x.text}</span>
+            </li>
+          ))}
         </ul>
       )}
     </div>

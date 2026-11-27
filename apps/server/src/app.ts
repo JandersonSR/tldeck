@@ -101,7 +101,8 @@ export async function buildApp({ config, store = new DeckStore(config.mongo), se
   await app.register(peopleRoutes, { gh, org: config.github.org });
   if (startSync) app.addHook('onReady', async () => { await agents.init().catch(() => undefined); });
   if (startSync) {
-    app.addHook('onReady', async () => { sync.start(); infra.start(); notifier.start(); if (!config.demo.on) dispatcher.start(); });
+    // onListen, not onReady: a second deck that fails to bind the port must not run jobs (or dispatch) in the background.
+    app.addHook('onListen', async () => { sync.start(); infra.start(); notifier.start(); if (!config.demo.on) dispatcher.start(); });
     app.addHook('onClose', async () => { sync.stop(); infra.stop(); notifier.stop(); dispatcher.stop(); });
   }
 

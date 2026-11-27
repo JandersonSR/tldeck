@@ -1,7 +1,7 @@
 // Common infrastructure format: each provider (DigitalOcean, Heroku, Azure, Grafana…) translates its own API
 // into resources, alerts and deploys. The deck only READS: no adapter restarts, scales or changes anything.
 
-export type InfraProviderId = 'digitalocean' | 'heroku' | 'azure' | 'grafana' | 'demo';
+export type InfraProviderId = 'digitalocean' | 'heroku' | 'azure' | 'grafana' | 'issabel' | 'demo';
 export type ResourceStatus = 'ok' | 'warn' | 'down' | 'unknown';
 export type AlertSeverity = 'critical' | 'warning' | 'info';
 
@@ -9,6 +9,9 @@ export interface InfraMetrics { cpu?: number | undefined; memory?: number | unde
 
 /** What runs the resource: dyno type, App Platform component… (`up` = instances running, when known). */
 export interface InfraComponent { type: string; size?: string | undefined; count: number; up?: number | undefined }
+
+/** One check behind the resource status (e.g. the Issabel collector's items), shown on the card. */
+export interface InfraDetail { label: string; status: ResourceStatus; text: string }
 
 export interface InfraResource {
   /** Unique across providers: "<provider>:<native id>". */
@@ -22,6 +25,7 @@ export interface InfraResource {
   region?: string | undefined;
   url?: string | undefined;
   components?: InfraComponent[] | undefined;
+  details?: InfraDetail[] | undefined;
 }
 
 export interface InfraAlert {

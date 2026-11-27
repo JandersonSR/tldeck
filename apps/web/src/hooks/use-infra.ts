@@ -8,10 +8,12 @@ export type ResourceStatus = 'ok' | 'warn' | 'down' | 'unknown';
 export type AlertSeverity = 'critical' | 'warning' | 'info';
 export interface MetricPoint { at: number; cpu?: number; memory?: number }
 export interface InfraComponent { type: string; size?: string; count: number; up?: number }
+/** One check behind the status (e.g. the Issabel collector's items). */
+export interface InfraDetail { label: string; status: ResourceStatus; text: string }
 export interface InfraResourceView {
   id: string; provider: string; kind: string; name: string; status: ResourceStatus; statusText?: string;
   metrics?: { cpu?: number; memory?: number; disk?: number }; region?: string; url?: string; production: boolean; history: MetricPoint[];
-  components?: InfraComponent[];
+  components?: InfraComponent[]; details?: InfraDetail[];
 }
 export interface FiringAlert {
   fingerprint: string; provider: string; resourceId?: string; resourceName?: string; title: string; severity: AlertSeverity;

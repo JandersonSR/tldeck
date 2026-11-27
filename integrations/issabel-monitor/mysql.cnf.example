@@ -1,0 +1,5 @@
+# /etc/tldeck-monitor/mysql.cnf  (dono asterisk, permissão 600)
+[client]
+user = tldeck_ro
+password = __MYSQL_PASSWORD__
+host = localhost

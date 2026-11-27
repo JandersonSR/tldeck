@@ -119,7 +119,7 @@ function reposCheck(cfg: Config, tr: Tr): Check {
 export function infraCheck(cfg: Config, tr: Tr): Check {
   const base = { id: 'infra', label: tr('Infra (DigitalOcean, Heroku, Azure, Grafana)', 'Infra (DigitalOcean, Heroku, Azure, Grafana)') };
   const i = cfg.infra;
-  const on = [i.digitalocean && 'DigitalOcean', i.heroku && 'Heroku', i.azure && 'Azure', i.grafana && 'Grafana'].filter(Boolean) as string[];
+  const on = [i.digitalocean && 'DigitalOcean', i.heroku && 'Heroku', i.azure && 'Azure', i.grafana && 'Grafana', i.issabel && 'Issabel'].filter(Boolean) as string[];
   if (cfg.demo.on) return { ...base, state: 'ok', detail: tr('dados fictícios do modo demonstração', 'demo mode fictitious data') };
   if (!on.length) return { ...base, state: 'off', detail: tr('nenhum provedor configurado', 'no provider configured'), hint: tr('Use tokens só de leitura: DIGITALOCEAN_TOKEN, HEROKU_API_KEY, AZURE_* (service principal com Monitoring Reader) ou GRAFANA_URL + GRAFANA_TOKEN (Viewer).', 'Use read-only tokens: DIGITALOCEAN_TOKEN, HEROKU_API_KEY, AZURE_* (service principal with Monitoring Reader) or GRAFANA_URL + GRAFANA_TOKEN (Viewer).') };
   return { ...base, state: 'ok', detail: `${on.join(', ')} · ${tr('leitura a cada', 'polling every')} ${i.pollSec} s` };

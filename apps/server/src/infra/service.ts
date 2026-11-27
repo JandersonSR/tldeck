@@ -8,6 +8,7 @@ import { demoInfraProvider } from './demo.js';
 import { digitalOceanProvider } from './digitalocean.js';
 import { grafanaProvider } from './grafana.js';
 import { herokuProvider } from './heroku.js';
+import { issabelProvider } from './issabel.js';
 import { newTrackerState, step, suspectDeploy, type FiringAlert, type InfraEvent, type TrackerRules } from './tracker.js';
 import type { InfraProvider, InfraProviderId, InfraResource, InfraSnapshot } from './types.js';
 
@@ -27,6 +28,7 @@ export function providersFrom(cfg: Config): InfraProvider[] {
     ...(i.heroku ? [herokuProvider(i.heroku)] : []),
     ...(i.azure ? [azureProvider(i.azure)] : []),
     ...(i.grafana ? [grafanaProvider(i.grafana)] : []),
+    ...(i.issabel ? [issabelProvider(i.issabel)] : []),
   ];
 }
 
@@ -97,6 +99,7 @@ export class InfraService {
     merged.resources = merged.resources.map(r => ({
       ...r, name: this.mask(r.name).text, ...(r.statusText ? { statusText: this.mask(r.statusText).text } : {}),
       ...(r.components ? { components: r.components.map(c => ({ ...c, type: this.mask(c.type).text })) } : {}),
+      ...(r.details ? { details: r.details.map(x => ({ ...x, label: this.mask(x.label).text, text: this.mask(x.text).text })) } : {}),
     }));
     merged.alerts = merged.alerts.map(a => ({ ...a, title: this.mask(a.title).text }));
 

@@ -1,0 +1,19 @@
+[Unit]
+Description=TLDeck Issabel monitor: eventos do auditd (ausearch -k asterisk_perm)
+Documentation=file:///opt/tldeck-monitor/README.md
+
+[Service]
+Type=oneshot
+# ausearch precisa de root para ler /var/log/audit. Só ele roda como root, isolado do coletor.
+User=root
+Environment=LC_ALL=C
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tldeck-monitor
+ProtectHome=yes
+PrivateTmp=yes
+# Código 1 = nenhum evento ("<no matches>"): também é resultado válido.
+ExecStart=/bin/sh -c 'umask 027; /sbin/ausearch -k asterisk_perm -ts yesterday -i > /var/lib/tldeck-monitor/audit.tmp 2>&1; rc=$?; if [ $rc -le 1 ]; then chgrp asterisk /var/lib/tldeck-monitor/audit.tmp && mv -f /var/lib/tldeck-monitor/audit.tmp /var/lib/tldeck-monitor/audit.txt; else exit $rc; fi'

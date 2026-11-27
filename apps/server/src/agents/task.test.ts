@@ -43,6 +43,13 @@ describe('end-to-end task', () => {
     expect(parsePlan('sem json').ok).toBe(false);
   });
 
+  it('clips long plan fields instead of rejecting the plan', () => {
+    const long = { ...plan, steps: ['x'.repeat(2000), 'ok'], risks: Array.from({ length: 25 }, (_, i) => `r${i}`) };
+    const r = parsePlan('```json\n' + JSON.stringify(long) + '\n```');
+    expect(r.ok).toBe(true);
+    if (r.ok) { expect(r.value.steps[0]!.length).toBe(1500); expect(r.value.steps[1]).toBe('ok'); expect(r.value.risks).toHaveLength(20); }
+  });
+
   it('the PR body closes the issue and says an agent made it', () => {
     const body = buildPrBody({ issueNumber: 42, plan, verify: { command: 'npm test', ok: false } });
     expect(body).toMatch(/^Closes #42/);
