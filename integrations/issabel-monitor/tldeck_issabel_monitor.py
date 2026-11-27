@@ -43,10 +43,13 @@ RANK = {OK: 0, UNKNOWN: 1, WARN: 2, CRIT: 3}
 AREAS = [
     ('service', 'Serviço Asterisk'),
     ('recordings', 'Gravações'),
+    ('calls', 'Ligações'),
+    ('telephony', 'Troncos e ramais'),
+    ('system', 'Servidor (CPU/RAM)'),
+    ('disk', 'Disco'),
+    ('db', 'Banco de dados'),
     ('permissions', 'Permissões das gravações'),
     ('log', 'Erros no log'),
-    ('disk', 'Disco das gravações'),
-    ('telephony', 'Telefonia'),
     ('cli', 'Socket do CLI'),
     ('audit', 'Auditoria de permissões'),
 ]
@@ -58,6 +61,8 @@ DEFAULTS = {
         'log_file': '/var/log/asterisk/full',
         'cli_socket': '/var/run/asterisk/asterisk.ctl',
         'audit_file': '/var/lib/tldeck-monitor/audit.txt',
+        # Partitions besides the recordings one (same partition is shown once; missing paths are skipped).
+        'disk_paths': '/, /var/lib/mysql, /var/log',
     },
     'service': {'unit': 'asterisk.service'},
     'cdr': {
@@ -65,11 +70,24 @@ DEFAULTS = {
         'database': 'asteriskcdrdb', 'hours': '2', 'max_rows': '20000', 'csv_file': '',
         # Calls answered in the last minutes may still be recording / not flushed yet.
         'grace_minutes': '2',
+        # The first unit that exists is the DB service.
+        'db_units': 'mariadb.service, mysqld.service, mysql.service',
+    },
+    'calls': {
+        # Direction from the CDR: inbound by dcontext; outbound = internal context dialing an external number.
+        'inbound_context_re': r'^(from-trunk|from-pstn|ext-did|from-did|from-sip-external|from-dahdi)',
+        'outbound_context_re': r'^(from-internal|macro-dialout|outbound|outrt)',
+        'outbound_dst_re': r'^\+?\d{7,}$',
+        'window_minutes': '60',
+        'min_calls': '5', 'fail_warn_pct': '20', 'fail_crit_pct': '50',
+        # Nothing coming in for a whole window during these hours is a warning (empty = never).
+        'business_hours': '08:00-18:00', 'business_days': '1-5',
     },
     'ami': {'enabled': 'true', 'host': '127.0.0.1', 'port': '5038', 'user': 'tldeck', 'secret': '',
             'extension_re': r'^\d{2,6}$', 'timeout': '8'},
-    'thresholds': {'disk_warn': '80', 'disk_crit': '90', 'empty_bytes': '44', 'audit_hours': '24'},
-    'intervals': {'fast': '30', 'normal': '60', 'slow': '300'},
+    'thresholds': {'disk_warn': '80', 'disk_crit': '90', 'empty_bytes': '44', 'audit_hours': '24',
+                   'cpu_warn': '85', 'cpu_crit': '95', 'mem_warn': '85', 'mem_crit': '95', 'db_slow_ms': '2000'},
+    'intervals': {'fast': '30', 'normal': '60', 'cdr': '120', 'slow': '300'},
 }
 
 LOG_MAX_READ = 16 * 1024 * 1024
@@ -235,46 +253,58 @@ def log_checks(tail, now):
     status = CRIT if c[15] else WARN if c[60] else OK
     summary = 'Cannot open: %d em 5 min · %d em 15 min · %d em 60 min' % (c[5], c[15], c[60]) if c[60] else 'nenhum "Cannot open" na última hora'
     out = [check('recordings.cannot_open', 'recordings', 'MixMonitor "Cannot open"', status, summary, data)]
-    labels = {'db_locked': 'database is locked', 'addr_in_use': 'Address already in use', 'module_load': 'falha ao carregar módulo'}
+    labels = {'db_locked': 'astdb: database is locked', 'addr_in_use': 'Address already in use', 'module_load': 'falha ao carregar módulo'}
     for kind in ('db_locked', 'addr_in_use', 'module_load'):
         n = {w: tail.count(kind, w * 60, now) for w in (5, 15, 60)}
         st = WARN if n[60] else OK
         sm = '%d em 5 min · %d em 15 min · %d em 60 min' % (n[5], n[15], n[60]) if n[60] else 'nenhuma ocorrência na última hora'
-        out.append(check('log.' + kind, 'log', labels[kind], st, sm,
+        # The SQLite astdb lock is a database problem: it shows next to MySQL.
+        out.append(check('log.' + kind, 'db' if kind == 'db_locked' else 'log', labels[kind], st, sm,
                          {'last5m': n[5], 'last15m': n[15], 'last60m': n[60], 'lastLine': tail.last.get(kind)}))
     return out
 
 
 # ---------------------------------------------------------------- CDR x disk
 
+CDR_COLS = ('disposition', 'recordingfile', 'dcontext', 'dst')
+
+
+def mysql_query(cfg, sql, timeout=30):
+    cmd = [cfg.get('cdr', 'mysql_bin'), '--defaults-extra-file=' + cfg.get('cdr', 'defaults_file'),
+           '-N', '-B', '-e', sql, cfg.get('cdr', 'database')]
+    code, out, err = run(cmd, timeout=timeout)
+    if code != 0:
+        raise RuntimeError('mysql: %s' % (err.strip().splitlines() or ['erro %d' % code])[-1][:200])
+    return [line.split('\t') for line in out.splitlines()]
+
+
 def cdr_rows(cfg, hours, now):
-    """[(calldate_epoch, recordingfile)] for answered calls with a recording in the window."""
+    """Every CDR row of the window as {t, disposition, recordingfile, dcontext, dst} (newest first, LIMIT)."""
     csv_file = cfg.get('cdr', 'csv_file')
     since = now - hours * 3600
     rows = []
-    if csv_file:  # simulation: calldate;disposition;recordingfile
+    if csv_file:  # simulation: calldate;disposition;recordingfile;dcontext;dst
         with open(csv_file) as f:
             for line in f:
                 parts = line.rstrip('\n').split(';')
-                if len(parts) < 3 or parts[1] != 'ANSWERED' or not parts[2]:
+                if len(parts) < 2:
                     continue
+                parts += [''] * (1 + len(CDR_COLS) - len(parts))
                 t = time.mktime(time.strptime(parts[0], '%Y-%m-%d %H:%M:%S'))
                 if t >= since:
-                    rows.append((t, parts[2]))
+                    row = dict(zip(CDR_COLS, parts[1:]))
+                    row['t'] = t
+                    rows.append(row)
         return rows
-    hours = int(hours)
-    q = ("SELECT DATE_FORMAT(calldate, '%%Y-%%m-%%d %%H:%%i:%%s'), recordingfile FROM cdr "
-         "WHERE calldate >= NOW() - INTERVAL %d HOUR AND disposition = 'ANSWERED' AND recordingfile <> '' "
-         "ORDER BY calldate DESC LIMIT %d" % (hours, cfg.getint('cdr', 'max_rows')))
-    cmd = [cfg.get('cdr', 'mysql_bin'), '--defaults-extra-file=' + cfg.get('cdr', 'defaults_file'),
-           '-N', '-B', '-e', q, cfg.get('cdr', 'database')]
-    code, out, err = run(cmd, timeout=30)
-    if code != 0:
-        raise RuntimeError('mysql: %s' % (err.strip().splitlines() or ['erro %d' % code])[-1][:200])
-    for line in out.splitlines():
-        parts = line.split('\t')
-        if len(parts) == 2 and parts[1] and parts[1] != 'NULL':
-            rows.append((time.mktime(time.strptime(parts[0], '%Y-%m-%d %H:%M:%S')), parts[1]))
+    q = ("SELECT DATE_FORMAT(calldate, '%%Y-%%m-%%d %%H:%%i:%%s'), %s FROM cdr "
+         "WHERE calldate >= NOW() - INTERVAL %d HOUR ORDER BY calldate DESC LIMIT %d"
+         % (', '.join(CDR_COLS), int(hours), cfg.getint('cdr', 'max_rows')))
+    for parts in mysql_query(cfg, q):
+        if len(parts) != 1 + len(CDR_COLS):
+            continue
+        row = dict(zip(CDR_COLS, ('' if v == 'NULL' else v for v in parts[1:])))
+        row['t'] = time.mktime(time.strptime(parts[0], '%Y-%m-%d %H:%M:%S'))
+        rows.append(row)
     return rows
 
 
@@ -285,23 +315,96 @@ def recording_path(root, calldate, name):
     return os.path.join(root, day, name)
 
 
-def cdr_check(cfg, now):
+def cdr_job(cfg, now):
+    """One CDR query per run feeds both the recordings comparison and the in/out call counts."""
     if not cfg.getboolean('cdr', 'enabled'):
-        return [check('recordings.cdr_vs_disk', 'recordings', 'CDR × disco', UNKNOWN, 'desativado na configuração')]
+        return [check('recordings.cdr_vs_disk', 'recordings', 'CDR × disco', UNKNOWN, 'desativado na configuração'),
+                check('calls.cdr', 'calls', 'Ligações (CDR)', UNKNOWN, 'CDR desativado na configuração')]
+    try:
+        rows = cdr_rows(cfg, cfg.getint('cdr', 'hours'), now)
+    except Exception as e:  # noqa
+        return [check('recordings.cdr_vs_disk', 'recordings', 'CDR × disco', UNKNOWN, 'CDR indisponível: %s' % e),
+                check('calls.cdr', 'calls', 'Ligações (CDR)', UNKNOWN, 'CDR indisponível: %s' % e)]
+    return cdr_check(cfg, rows, now) + calls_checks(cfg, rows, now)
+
+
+def in_business_hours(cfg, now):
+    hours, days = cfg.get('calls', 'business_hours').strip(), cfg.get('calls', 'business_days').strip()
+    if not hours:
+        return False
+    lt = time.localtime(now)
+    try:
+        d0, d1 = (int(x) for x in days.split('-')) if days else (1, 7)
+        h0, h1 = hours.split('-')
+        start = int(h0[:2]) * 60 + int(h0[3:5])
+        end = int(h1[:2]) * 60 + int(h1[3:5])
+    except ValueError:
+        return False
+    return d0 <= lt.tm_wday + 1 <= d1 and start <= lt.tm_hour * 60 + lt.tm_min < end
+
+
+def calls_checks(cfg, rows, now):
+    """Calls coming in and going out in the window: answered, not answered, busy and failed (FAILED/CONGESTION)."""
+    c = cfg['calls']
+    window = int(c['window_minutes'])
+    in_re, out_re, dst_re = re.compile(c['inbound_context_re']), re.compile(c['outbound_context_re']), re.compile(c['outbound_dst_re'])
+    min_calls, warn_pct, crit_pct = int(c['min_calls']), float(c['fail_warn_pct']), float(c['fail_crit_pct'])
+    stats = {d: {'total': 0, 'answered': 0, 'noAnswer': 0, 'busy': 0, 'failed': 0, 'last': None} for d in ('in', 'out', 'internal')}
+    for r in rows:
+        if r['t'] < now - window * 60:
+            continue
+        if in_re.search(r.get('dcontext', '')):
+            d = 'in'
+        elif out_re.search(r.get('dcontext', '')) and dst_re.match(r.get('dst', '')):
+            d = 'out'
+        else:
+            d = 'internal'
+        s = stats[d]
+        s['total'] += 1
+        disp = r.get('disposition', '').upper()
+        key = {'ANSWERED': 'answered', 'NO ANSWER': 'noAnswer', 'BUSY': 'busy'}.get(disp, 'failed' if disp in ('FAILED', 'CONGESTION') else None)
+        if key:
+            s[key] += 1
+        s['last'] = max(s['last'] or 0, r['t'])
+    business = in_business_hours(cfg, now)
+    out = []
+    for d, cid, label in (('in', 'calls.inbound', 'Entrando'), ('out', 'calls.outbound', 'Saindo')):
+        s = stats[d]
+        rate = round(100.0 * s['failed'] / s['total'], 1) if s['total'] else 0.0
+        data = dict(s, failedPct=rate, windowMinutes=window, last=now_iso(s['last']) if s['last'] else None)
+        if s['total']:
+            summary = '%d em %d min · %d atendidas · %d não atendidas · %d ocupado · %d falhas (%.0f%%)' % (
+                s['total'], window, s['answered'], s['noAnswer'], s['busy'], s['failed'], rate)
+            status = OK
+            if s['total'] >= min_calls and rate >= crit_pct:
+                status = CRIT
+            elif s['total'] >= min_calls and rate >= warn_pct:
+                status = WARN
+        else:
+            summary = 'nenhuma ligação em %d min' % window
+            # Silence on the inbound side during business hours usually means the trunk or the DID is broken.
+            status = WARN if d == 'in' and business else OK
+            if status == WARN:
+                summary += ' (horário comercial)'
+        out.append(check(cid, 'calls', label, status, summary, data))
+    si = stats['internal']
+    out.append(check('calls.internal', 'calls', 'Internas', OK, '%d em %d min · %d atendidas' % (si['total'], window, si['answered']),
+                     dict(si, windowMinutes=window, last=now_iso(si['last']) if si['last'] else None)))
+    return out
+
+
+def cdr_check(cfg, rows, now):
     hours = cfg.getint('cdr', 'hours')
     grace = cfg.getint('cdr', 'grace_minutes') * 60
     empty_max = cfg.getint('thresholds', 'empty_bytes')
     root = cfg.get('paths', 'monitor_root')
-    try:
-        rows = cdr_rows(cfg, hours, now)
-    except Exception as e:  # noqa
-        return [check('recordings.cdr_vs_disk', 'recordings', 'CDR × disco', UNKNOWN, 'CDR indisponível: %s' % e)]
     tot = {'all': 0, 'hour': 0}
     present = missing = empty = 0
     lost_hour = 0
     samples = []
-    for calldate, name in rows:
-        if calldate > now - grace:
+    for r in rows:
+        calldate, name = r['t'], r.get('recordingfile', '')
+        if r.get('disposition', '').upper() != 'ANSWERED' or not name or calldate > now - grace:
             continue
         path = recording_path(root, calldate, name)
         alt = os.path.join(root, os.path.basename(name))
@@ -331,10 +434,120 @@ def cdr_check(cfg, now):
     data = {'hours': hours, 'total': tot['all'], 'present': present, 'missing': missing, 'empty': empty,
             'lostRate': rate_all, 'totalLastHour': tot['hour'], 'lostLastHour': lost_hour, 'lostRateLastHour': rate_hour,
             'samples': samples}
+    data['okLastHour'] = tot['hour'] - lost_hour
+    data['okRateLastHour'] = round(100.0 - rate_hour, 1) if tot['hour'] else None
     status = CRIT if lost_hour else WARN if lost else OK
-    summary = 'perdidas 1 h: %d/%d (%.0f%%) · %d h: %d/%d (%d ausentes, %d vazias)' % (
-        lost_hour, tot['hour'], rate_hour, hours, lost, tot['all'], missing, empty) if tot['all'] else 'sem chamadas gravadas nas últimas %d h' % hours
-    return [check('recordings.cdr_vs_disk', 'recordings', 'CDR × disco', status, summary, data)]
+    if tot['all']:
+        summary = 'gravadas 1 h: %d/%d (%.0f%%) · perdidas 1 h: %d · %d h: %d/%d perdidas (%d ausentes, %d vazias)' % (
+            tot['hour'] - lost_hour, tot['hour'], 100.0 - rate_hour if tot['hour'] else 100.0, lost_hour, hours, lost, tot['all'], missing, empty)
+    else:
+        summary = 'sem chamadas atendidas com gravação nas últimas %d h' % hours
+    return [check('recordings.cdr_vs_disk', 'recordings', 'Gravadas × perdidas (CDR × disco)', status, summary, data)]
+
+
+# ---------------------------------------------------------------- database
+
+def db_check(cfg, now):
+    """MySQL/MariaDB service up, answering a query in time, and the CDR still being written."""
+    if cfg.get('cdr', 'csv_file'):
+        return [check('db.mysql', 'db', 'MySQL/MariaDB (CDR)', UNKNOWN, 'não verificado (simulação)')]
+    if not cfg.getboolean('cdr', 'enabled'):
+        return [check('db.mysql', 'db', 'MySQL/MariaDB (CDR)', UNKNOWN, 'CDR desativado na configuração')]
+    data = {}
+    for unit in [u.strip() for u in cfg.get('cdr', 'db_units').split(',') if u.strip()]:
+        try:
+            _, out, _ = run(['systemctl', 'show', unit, '-p', 'LoadState', '-p', 'ActiveState', '-p', 'SubState'], timeout=10)
+        except Exception:  # noqa
+            break
+        props = dict(line.split('=', 1) for line in out.splitlines() if '=' in line)
+        if props.get('LoadState') == 'loaded':
+            data.update({'unit': unit, 'state': '%s/%s' % (props.get('ActiveState'), props.get('SubState'))})
+            if props.get('ActiveState') != 'active':
+                return [check('db.mysql', 'db', 'MySQL/MariaDB (CDR)', CRIT, '%s parado (%s)' % (unit, data['state']), data)]
+            break
+    t0 = time.time()
+    try:
+        rows = mysql_query(cfg, "SELECT DATE_FORMAT(MAX(calldate), '%Y-%m-%d %H:%i:%s') FROM cdr WHERE calldate >= NOW() - INTERVAL 1 DAY", timeout=15)
+    except Exception as e:  # noqa
+        return [check('db.mysql', 'db', 'MySQL/MariaDB (CDR)', CRIT, 'não responde: %s' % e, data)]
+    ms = int((time.time() - t0) * 1000)
+    last = rows[0][0] if rows and rows[0] and rows[0][0] not in ('', 'NULL') else None
+    data.update({'queryMs': ms, 'lastCdr': last})
+    summary = 'responde em %d ms' % ms
+    if data.get('unit'):
+        summary = '%s ativo · %s' % (data['unit'].replace('.service', ''), summary)
+    if last:
+        age = now - time.mktime(time.strptime(last, '%Y-%m-%d %H:%M:%S'))
+        data['lastCdrAgeSec'] = int(age)
+        summary += ' · último CDR há %s' % human_age(max(0, age))
+    else:
+        summary += ' · nenhum CDR em 24 h'
+    status = WARN if ms > cfg.getint('thresholds', 'db_slow_ms') else OK
+    if status == WARN:
+        summary = 'lento · ' + summary
+    return [check('db.mysql', 'db', 'MySQL/MariaDB (CDR)', status, summary, data)]
+
+
+# ---------------------------------------------------------------- CPU / RAM
+
+class SystemStats(object):
+    """CPU from /proc/stat deltas between runs (the first run samples 1 s); memory from /proc/meminfo."""
+
+    def __init__(self):
+        self.prev = None
+        self.samples = deque(maxlen=3)
+
+    @staticmethod
+    def cpu_times():
+        with open('/proc/stat') as f:
+            vals = [int(x) for x in f.readline().split()[1:9]]
+        idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+        return sum(vals), idle
+
+    def cpu_pct(self):
+        cur = self.cpu_times()
+        if self.prev is None:
+            time.sleep(1)
+            self.prev, cur = cur, self.cpu_times()
+        total, idle = cur[0] - self.prev[0], cur[1] - self.prev[1]
+        self.prev = cur
+        return round(100.0 * (total - idle) / total, 1) if total > 0 else 0.0
+
+    def checks(self, cfg):
+        th = cfg['thresholds']
+        lvl = lambda p, w, c: CRIT if p >= c else WARN if p >= w else OK  # noqa
+        out = []
+        try:
+            pct = self.cpu_pct()
+            self.samples.append(pct)
+            # Status from the lower of the last two samples: one busy minute is not an alert.
+            judged = min(list(self.samples)[-2:])
+            with open('/proc/loadavg') as f:
+                load = [float(x) for x in f.read().split()[:3]]
+            cores = os.cpu_count() or 1
+            out.append(check('system.cpu', 'system', 'CPU', lvl(judged, float(th['cpu_warn']), float(th['cpu_crit'])),
+                             '%.0f%% · load %.2f / %.2f / %.2f · %d núcleos' % (pct, load[0], load[1], load[2], cores),
+                             {'usedPct': pct, 'load': load, 'cores': cores}))
+        except Exception as e:  # noqa
+            out.append(check('system.cpu', 'system', 'CPU', UNKNOWN, '/proc/stat ilegível: %s' % e))
+        try:
+            mem = {}
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    k, v = line.split(':', 1)
+                    mem[k] = int(v.split()[0])  # kB
+            total = mem['MemTotal']
+            avail = mem.get('MemAvailable', mem.get('MemFree', 0) + mem.get('Buffers', 0) + mem.get('Cached', 0))
+            used = round(100.0 * (total - avail) / total, 1)
+            swap_t = mem.get('SwapTotal', 0)
+            swap = round(100.0 * (swap_t - mem.get('SwapFree', 0)) / swap_t, 1) if swap_t else 0.0
+            gb = lambda kb: kb / 1024.0 ** 2  # noqa
+            out.append(check('system.memory', 'system', 'Memória', lvl(used, float(th['mem_warn']), float(th['mem_crit'])),
+                             '%.0f%% usada · %.1f de %.1f GB · swap %.0f%%' % (used, gb(total - avail), gb(total), swap),
+                             {'usedPct': used, 'totalGb': round(gb(total), 2), 'availableGb': round(gb(avail), 2), 'swapPct': swap}))
+        except Exception as e:  # noqa
+            out.append(check('system.memory', 'system', 'Memória', UNKNOWN, '/proc/meminfo ilegível: %s' % e))
+        return out
 
 
 # ---------------------------------------------------------------- permissions
@@ -407,22 +620,47 @@ def permissions_check(cfg, now):
 
 # ---------------------------------------------------------------- disk / cli
 
+def mountpoint(path):
+    path = os.path.realpath(path)
+    dev = os.stat(path).st_dev
+    while path != '/':
+        parent = os.path.dirname(path)
+        if os.stat(parent).st_dev != dev:
+            return path
+        path = parent
+    return '/'
+
+
 def disk_checks(cfg):
+    """Space and inodes of the recordings partition (ids disk.space / disk.inodes) and of the other partitions in disk_paths."""
     root = cfg.get('paths', 'monitor_root')
     warn, crit = cfg.getint('thresholds', 'disk_warn'), cfg.getint('thresholds', 'disk_crit')
-    try:
-        v = os.statvfs(root)
-    except OSError as e:
-        return [check('disk.space', 'disk', 'Espaço', UNKNOWN, str(e.strerror))]
-    used = v.f_blocks - v.f_bfree
-    space = round(100.0 * used / (used + v.f_bavail), 1) if used + v.f_bavail else 0.0
-    inodes = round(100.0 * (v.f_files - v.f_ffree) / v.f_files, 1) if v.f_files else 0.0
-    free_gb = round(v.f_bavail * v.f_frsize / 1024.0 ** 3, 1)
     lvl = lambda p: CRIT if p >= crit else WARN if p >= warn else OK  # noqa
-    return [
-        check('disk.space', 'disk', 'Espaço', lvl(space), '%.0f%% usado · %.1f GB livres' % (space, free_gb), {'usedPct': space, 'freeGb': free_gb}),
-        check('disk.inodes', 'disk', 'Inodes', lvl(inodes), '%.0f%% dos inodes usados' % inodes, {'usedPct': inodes}),
-    ]
+    extra = [p.strip() for p in cfg.get('paths', 'disk_paths').split(',') if p.strip()]
+    out, seen = [], set()
+    for i, path in enumerate([root] + extra):
+        try:
+            dev = os.stat(path).st_dev
+            v = os.statvfs(path)
+            mnt = mountpoint(path)
+        except OSError as e:
+            if i == 0:
+                out.append(check('disk.space', 'disk', 'Espaço (gravações)', UNKNOWN, '%s: %s' % (path, e.strerror)))
+            continue
+        if dev in seen:
+            continue
+        seen.add(dev)
+        suffix = '' if i == 0 else '.' + (re.sub(r'[^a-z0-9]+', '_', mnt.lower()).strip('_') or 'root')
+        name = 'gravações, %s' % mnt if i == 0 else mnt
+        used = v.f_blocks - v.f_bfree
+        space = round(100.0 * used / (used + v.f_bavail), 1) if used + v.f_bavail else 0.0
+        inodes = round(100.0 * (v.f_files - v.f_ffree) / v.f_files, 1) if v.f_files else 0.0
+        free_gb = round(v.f_bavail * v.f_frsize / 1024.0 ** 3, 1)
+        out.append(check('disk.space' + suffix, 'disk', 'Espaço (%s)' % name, lvl(space), '%.0f%% usado · %.1f GB livres' % (space, free_gb),
+                         {'mount': mnt, 'usedPct': space, 'freeGb': free_gb}))
+        out.append(check('disk.inodes' + suffix, 'disk', 'Inodes (%s)' % name, lvl(inodes), '%.0f%% dos inodes usados' % inodes,
+                         {'mount': mnt, 'usedPct': inodes}))
+    return out
 
 
 def cli_check(cfg):
@@ -630,20 +868,23 @@ class Collector(object):
         self.cfg = cfg
         self.simulate = simulate
         self.tail = LogTail(cfg.get('paths', 'log_file'))
+        self.system = SystemStats()
         self.lock = threading.Lock()
         self.results = {}
         self.since = {}
         self.next = {}
         iv = cfg['intervals']
-        fast, normal, slow = int(iv['fast']), int(iv['normal']), int(iv['slow'])
+        fast, normal, every_cdr, slow = int(iv['fast']), int(iv['normal']), int(iv['cdr']), int(iv['slow'])
         self.jobs = [
             ('service', fast, lambda now: service_check(self.cfg)),
             ('log', fast, lambda now: (self.tail.poll(now), log_checks(self.tail, now))[1]),
+            ('system', fast, lambda now: self.system.checks(self.cfg)),
             ('permissions', normal, lambda now: permissions_check(self.cfg, now)),
             ('disk', normal, lambda now: disk_checks(self.cfg)),
             ('cli', normal, lambda now: cli_check(self.cfg)),
             ('telephony', normal, lambda now: telephony_checks(self.cfg)),
-            ('cdr', slow, lambda now: cdr_check(self.cfg, now)),
+            ('db', normal, lambda now: db_check(self.cfg, now)),
+            ('cdr', every_cdr, lambda now: cdr_job(self.cfg, now)),
             ('audit', slow, lambda now: audit_check(self.cfg, now)),
         ]
 
@@ -656,7 +897,7 @@ class Collector(object):
             try:
                 checks = fn(now)
             except Exception as e:  # noqa  (one broken check never stops the others)
-                checks = [check('%s.error' % name, name if name != 'cdr' else 'recordings', name, UNKNOWN, 'falha na verificação: %s' % e)]
+                checks = [check('%s.error' % name, {'cdr': 'recordings'}.get(name, name), name, UNKNOWN, 'falha na verificação: %s' % e)]
             with self.lock:
                 for k in [k for k, v in self.results.items() if v.get('job') == name]:
                     del self.results[k]
@@ -784,11 +1025,14 @@ def build_simulation(base='/tmp/tldeck-sim'):
         f.writelines(lines)
     cdr = os.path.join(base, 'cdr.csv')
     fmt = lambda t: time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))  # noqa
+    # calldate;disposition;recordingfile;dcontext;dst. Calls flow normally (as on 26/11); only the recordings are lost.
     with open(cdr, 'w') as f:
-        f.write('%s;ANSWERED;out-1001-2002.wav\n' % fmt(now - 900))
-        f.write('%s;ANSWERED;%s\n' % (fmt(now - 1200), empty_file))
-        f.write('%s;ANSWERED;in-2003-1002.wav\n' % fmt(now - 600))
-        f.write('%s;NO ANSWER;\n' % fmt(now - 500))
+        f.write('%s;ANSWERED;out-1001-2002.wav;from-internal;11987654321\n' % fmt(now - 900))
+        f.write('%s;ANSWERED;%s;from-trunk;1001\n' % (fmt(now - 1200), empty_file))
+        f.write('%s;ANSWERED;in-2003-1002.wav;from-trunk;1002\n' % fmt(now - 600))
+        f.write('%s;NO ANSWER;;from-trunk;1003\n' % fmt(now - 500))
+        f.write('%s;BUSY;;from-internal;1133334444\n' % fmt(now - 400))
+        f.write('%s;ANSWERED;;from-internal;1002\n' % fmt(now - 300))
     audit = os.path.join(base, 'audit.txt')
     with open(audit, 'w') as f:
         f.write('----\ntype=PROCTITLE msg=audit(%s.101:900) : proctitle=chmod 555 %s\n'

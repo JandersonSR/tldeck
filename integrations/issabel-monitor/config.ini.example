@@ -17,6 +17,8 @@ log_file = /var/log/asterisk/full
 cli_socket = /var/run/asterisk/asterisk.ctl
 # Escrito pelo timer tldeck-issabel-audit (root) a cada 5 min.
 audit_file = /var/lib/tldeck-monitor/audit.txt
+# Outras partições para espaço/inodes (a das gravações sempre entra; mesma partição aparece uma vez).
+disk_paths = /, /var/lib/mysql, /var/log
 
 [service]
 unit = asterisk.service
@@ -32,6 +34,22 @@ hours = 2
 max_rows = 20000
 # Chamadas que terminaram há menos que isso são ignoradas (arquivo ainda sendo fechado).
 grace_minutes = 2
+# Serviço do banco: o primeiro que existir.
+db_units = mariadb.service, mysqld.service, mysql.service
+
+[calls]
+# Direção pelo CDR: entrada pelo dcontext; saída = contexto interno discando número externo.
+inbound_context_re = ^(from-trunk|from-pstn|ext-did|from-did|from-sip-external|from-dahdi)
+outbound_context_re = ^(from-internal|macro-dialout|outbound|outrt)
+outbound_dst_re = ^\+?\d{7,}$
+window_minutes = 60
+# Falhas = FAILED/CONGESTION. Só avalia com pelo menos min_calls ligações na janela.
+min_calls = 5
+fail_warn_pct = 20
+fail_crit_pct = 50
+# Nenhuma ligação entrando na janela, nesse horário, vira atenção (vazio = nunca). Dias: 1=seg … 7=dom.
+business_hours = 08:00-18:00
+business_days = 1-5
 
 [ami]
 enabled = true
@@ -49,9 +67,16 @@ disk_crit = 90
 # Gravação com até esse tamanho é considerada vazia (só o cabeçalho WAV).
 empty_bytes = 44
 audit_hours = 24
+cpu_warn = 85
+cpu_crit = 95
+mem_warn = 85
+mem_crit = 95
+# Consulta ao MySQL acima disso (ms) = lento.
+db_slow_ms = 2000
 
 [intervals]
-# segundos: serviço e log / permissões, disco, CLI, AMI / CDR e auditoria
+# segundos: serviço, log, CPU/RAM / permissões, disco, CLI, AMI, MySQL / CDR (gravações e ligações) / auditoria
 fast = 30
 normal = 60
+cdr = 120
 slow = 300

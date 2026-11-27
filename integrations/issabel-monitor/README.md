@@ -16,16 +16,22 @@ Com o coletor, isso vira um alerta **crítico** e um **incidente SEV2** no TLDec
 |---|---|---|---|---|
 | Serviço | Asterisk (systemd, PID, uptime, memória) | parado | reiniciado há < 10 min | 30 s |
 | Gravações | `Cannot open` do app_mixmonitor (5/15/60 min) | ≥ 1 em 15 min | ≥ 1 em 60 min | 30 s |
-| Gravações | CDR × disco: atendidas com `recordingfile`, arquivo ausente ou ≤ 44 bytes | taxa de perdidas > 0 na última hora | perdidas na janela (2 h) | 5 min |
+| Gravações | Gravadas × perdidas: atendidas com `recordingfile` no CDR, arquivo presente, ausente ou ≤ 44 bytes; taxa de sucesso da última hora | alguma perdida na última hora | perdidas na janela (2 h) | 2 min |
+| Ligações | Entrando e saindo (CDR, 60 min): total, atendidas, não atendidas, ocupado, falhas (`FAILED`/`CONGESTION`) | falhas ≥ 50% (mín. 5 ligações) | falhas ≥ 20%; nenhuma entrando em horário comercial | 2 min |
+| Troncos e ramais (AMI) | Chamadas ativas, registro dos troncos, ramais online/offline | tronco desregistrado | nenhum ramal online / AMI inacessível | 60 s |
+| Servidor | CPU (média entre leituras, load, núcleos) e memória (usada, swap) | ≥ 95% em 2 leituras seguidas (CPU) / ≥ 95% (RAM) | ≥ 85% | 30 s |
+| Disco | Espaço e inodes da partição das gravações e de `/`, `/var/lib/mysql`, `/var/log` | ≥ 90% | ≥ 80% | 60 s |
+| Banco de dados | MySQL/MariaDB: serviço ativo, tempo de resposta, último registro no CDR | parado ou sem resposta | resposta > 2 s | 60 s |
+| Banco de dados | astdb (SQLite): `database is locked` no log | | ≥ 1 em 60 min | 30 s |
 | Permissões | Dono, grupo e modo da pasta do dia e das pais; teste de escrita como `asterisk` | sem escrita ou sem acesso | (rodando como root) | 60 s |
-| Log | `database is locked`, `Address already in use`, falha de carga de módulo | | ≥ 1 em 60 min | 30 s |
-| Disco | Espaço e inodes da partição das gravações | ≥ 90% | ≥ 80% | 60 s |
-| Telefonia (AMI) | Chamadas ativas, registro dos troncos, ramais online/offline | tronco desregistrado | nenhum ramal online / AMI inacessível | 60 s |
+| Log | `Address already in use`, falha de carga de módulo | | ≥ 1 em 60 min | 30 s |
 | CLI | `/var/run/asterisk/asterisk.ctl` existe | | ausente | 60 s |
 | Auditoria | `ausearch -k asterisk_perm`: quem mudou dono ou permissão | | qualquer alteração em 24 h | 5 min |
 
 O log é lido **só pelo final**: a partir de onde parou na leitura anterior, no máximo 16 MB, percebendo a rotação.
-O CDR é lido por janela de tempo, com `LIMIT` e índice em `calldate`.
+O CDR é lido por janela de tempo (2 h), com `LIMIT` e índice em `calldate`: **uma** consulta a cada 2 min alimenta gravações e ligações.
+A direção da ligação vem do `dcontext` (entrada: `from-trunk`, `ext-did`…; saída: `from-internal` discando número com 7+ dígitos; o resto é interna). Ajuste as regex em `[calls]` se o seu discado usar outros contextos.
+O CDR tem um registro por perna, então ligações que passam por fila ou ring group podem contar mais de uma vez: os números servem para tendência e taxa de falha, não para faturamento.
 Chamadas encerradas há menos de 2 min são ignoradas na comparação, porque o arquivo pode ainda estar sendo fechado.
 
 ## Arquitetura
@@ -72,10 +78,10 @@ Use a senha que o install gerou em `/etc/tldeck-monitor/mysql.cnf`:
 
 ```sql
 CREATE USER 'tldeck_ro'@'localhost' IDENTIFIED BY '<senha do mysql.cnf>';
-GRANT SELECT (calldate, disposition, recordingfile) ON asteriskcdrdb.cdr TO 'tldeck_ro'@'localhost';
+GRANT SELECT (calldate, disposition, recordingfile, dcontext, dst) ON asteriskcdrdb.cdr TO 'tldeck_ro'@'localhost';
 ```
 
-É permissão de coluna: o usuário só lê essas 3 colunas da tabela `cdr`.
+É permissão de coluna: o usuário só lê essas 5 colunas da tabela `cdr` (nada de `src`/`clid`, ou seja, sem número de quem ligou).
 
 ### 3. Usuário AMI de leitura
 
@@ -137,7 +143,7 @@ journalctl -u tldeck-issabel-monitor -n 50
 A simulação **não toca** na pasta real de gravações, no MySQL nem no AMI. Tudo fica em `/tmp/tldeck-sim`:
 - a pasta do dia com permissão `555`, como no incidente, em que o MixMonitor não conseguia criar arquivos;
 - um `full` com `Cannot open` e `database is locked` com horário de agora;
-- um CDR (CSV) com gravações ausentes e uma de 44 bytes;
+- um CDR (CSV) com ligações entrando e saindo normalmente, mas com as gravações ausentes e uma de 44 bytes (como no incidente);
 - um evento do auditd com um `chmod` feito por root.
 
 Rode como **usuário comum**, não root, para que a falta de permissão realmente bloqueie. Pode ser em qualquer Linux, inclusive no WSL:
@@ -150,7 +156,9 @@ Resultado esperado:
 
 ```
 critical recordings.cannot_open   Cannot open: 2 em 5 min · 2 em 15 min · 3 em 60 min
-critical recordings.cdr_vs_disk   perdidas 1 h: 3/3 (100%) · 2 h: 3/3 (2 ausentes, 1 vazias)
+critical recordings.cdr_vs_disk   gravadas 1 h: 0/3 (0%) · perdidas 1 h: 3 · 2 h: 3/3 perdidas (2 ausentes, 1 vazias)
+ok       calls.inbound            3 em 60 min · 2 atendidas · 1 não atendidas · 0 ocupado · 0 falhas (0%)
+ok       calls.outbound           2 em 60 min · 1 atendidas · 0 não atendidas · 1 ocupado · 0 falhas (0%)
 critical permissions.day_folder   <usuário> NÃO grava em /tmp/tldeck-sim/monitor/AAAA/MM/DD … 0555 (Permission denied)
 warn     log.db_locked            0 em 5 min · 0 em 15 min · 1 em 60 min
 warn     audit.perm_changes       1 alteração(ões) em 24 h · última: chmod por root
