@@ -58,7 +58,7 @@ export class TaskService {
   private async planPreview(i: PlanInput, repoPath: string | undefined, ws: Workspace) {
     const scope = repoPath ? i.repo : '';
     // No repo (research, drafts, a docs folder): a feat-map search by title only brings unrelated packs.
-    const hits = scope ? (await this.ctx.featMaps.search(`${i.title} ${scope}`, { repo: scope, limit: 3 })).hits : [];
+    const hits = scope ? (await this.ctx.featMaps.search(`${i.title} ${scope}`, { repo: scope, limit: 3 })).hits.filter(h => h.matched.includes('repo alvo')) : [];
     const ctx = scope ? await this.ctx.featContext(`${i.title} ${scope}`, scope) : undefined;
     const raw = buildPlanPrompt({
       issue: { url: i.url, title: i.title, body: i.body }, userPrompt: i.userPrompt, featContext: ctx,

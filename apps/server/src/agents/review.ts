@@ -56,17 +56,32 @@ export function buildReviewPrompt(opts: { prUrl: string; skill?: string | undefi
   ].filter(Boolean).join('\n\n');
 }
 
+/**
+ * Agents write Windows paths raw inside JSON strings ("C:\Users\agx\…"): \U, \a, \c… are invalid escapes and
+ * JSON.parse rejects the whole answer. Only used after a failed parse: every backslash of a drive path (C:\…, up to
+ * the closing quote) is literal, even "\r" in "\reps"; elsewhere, backslashes that do not start a valid escape are doubled.
+ */
+export function repairJsonEscapes(s: string): string {
+  const paths = s.replace(/(?<![\\\w])([A-Za-z]:)((?:\\(?![\\"])[^\\"\n]*)+)/g, (_m, drive: string, rest: string) => drive + rest.replace(/\\/g, '\\\\'));
+  return paths.replace(/\\(u[0-9a-fA-F]{4}|["\\/bfnrt])|\\/g, (m, valid: string | undefined) => (valid ? m : '\\\\'));
+}
+
 /** Extracts the last valid JSON block from the agent's answer (from the end backwards). */
 export function parseJsonBlock<T>(text: string, schema: z.ZodType<T>): { ok: true; value: T } | { ok: false; error: string } {
   const blocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map(m => m[1]!);
   const candidates = blocks.length ? blocks.reverse() : [text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)];
+  let invalid: string | undefined;
   for (const c of candidates) {
-    try {
-      const parsed = schema.safeParse(JSON.parse(c));
+    for (const attempt of [c, repairJsonEscapes(c)]) {
+      let json: unknown;
+      try { json = JSON.parse(attempt); } catch { continue; }
+      const parsed = schema.safeParse(json);
       if (parsed.success) return { ok: true, value: parsed.data };
-    } catch { /* tenta o próximo */ }
+      invalid ??= parsed.error.issues.slice(0, 3).map(i => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+      break;
+    }
   }
-  return { ok: false, error: 'the agent did not return the expected JSON' };
+  return { ok: false, error: invalid ? `the agent's JSON does not match the contract (${invalid})` : 'the agent did not return the expected JSON' };
 }
 
 export const parseReviewResult = (text: string) => parseJsonBlock(text, ReviewResult);

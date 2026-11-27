@@ -43,6 +43,19 @@ describe('end-to-end task', () => {
     expect(parsePlan('sem json').ok).toBe(false);
   });
 
+  it('accepts raw Windows paths inside the JSON strings', () => {
+    const raw = '```json\n{"summary": "save under C:\\Users\\agx\\reps\\capacitacao\\Semanas", "steps": ["read C:\\Users\\agx\\a.md"], "files": ["Semanas\\\\x.md"], "tests": [], "risks": [], "questions": []}\n```';
+    expect(() => JSON.parse(raw.slice(8, -4))).toThrow();
+    const r = parsePlan(raw);
+    expect(r.ok).toBe(true);
+    if (r.ok) { expect(r.value.summary).toBe('save under C:\\Users\\agx\\reps\\capacitacao\\Semanas'); expect(r.value.files[0]).toBe('Semanas\\x.md'); }
+  });
+
+  it('says which field broke the contract', () => {
+    const r = parsePlan('```json\n{"summary": 1}\n```');
+    expect(!r.ok && r.error).toMatch(/does not match the contract \(summary/);
+  });
+
   it('clips long plan fields instead of rejecting the plan', () => {
     const long = { ...plan, steps: ['x'.repeat(2000), 'ok'], risks: Array.from({ length: 25 }, (_, i) => `r${i}`) };
     const r = parsePlan('```json\n' + JSON.stringify(long) + '\n```');
@@ -63,8 +76,8 @@ describe('end-to-end task', () => {
 });
 
 describe('tasks started from an agent request', () => {
-  it('the prompt version moved to t3', () => {
-    expect(TASK_PROMPT_VERSION).toBe('t3');
+  it('the prompt version moved to t4', () => {
+    expect(TASK_PROMPT_VERSION).toBe('t4');
   });
 
   it('the Tech Lead instruction comes first and trusted; the issue becomes delimited third-party data', () => {

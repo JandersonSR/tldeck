@@ -77,8 +77,9 @@ export class AgentContext {
     if (reason) throw Object.assign(new Error(reason), { statusCode: 429 });
   }
 
+  /** Feature packs for the prompt: only packs of the target repo (a pack that merely shares words with the title is noise). */
   async featContext(query: string, repo: string): Promise<string | undefined> {
-    const { hits } = await this.featMaps.search(query, { repo, limit: 3 });
+    const hits = (await this.featMaps.search(query, { repo, limit: 3 })).hits.filter(h => h.matched.includes('repo alvo'));
     if (!hits.length) return undefined;
     return hits.map(h => `## ${h.pack.map}:${h.pack.id} — ${h.pack.title}\n${this.mask(this.featMaps.readPack(h.pack).slice(0, 6000)).text}`).join('\n\n');
   }
